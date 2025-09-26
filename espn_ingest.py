@@ -37,12 +37,12 @@ ESPN_SCOREBOARD = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/
 ESPN_SUMMARY = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/summary"
 
 # -----------------------------
-# FIXED BigQuery schemas (season as INT64 to match existing table)
+# BigQuery schemas
 # -----------------------------
 GAMES_SCHEMA = [
     bigquery.SchemaField("game_id", "STRING"),
     bigquery.SchemaField("game_date", "DATE"),
-    bigquery.SchemaField("season", "INT64"),  # FIXED: Back to INT64
+    bigquery.SchemaField("season", "INT64"),
     bigquery.SchemaField("home_team_id", "INT64"),
     bigquery.SchemaField("home_team_abbr", "STRING"),
     bigquery.SchemaField("home_score", "INT64"),
@@ -55,7 +55,7 @@ GAMES_SCHEMA = [
 BOX_SCHEMA = [
     bigquery.SchemaField("game_id", "STRING"),
     bigquery.SchemaField("game_date", "DATE"),
-    bigquery.SchemaField("season", "INT64"),  # FIXED: Back to INT64
+    bigquery.SchemaField("season", "INT64"),
     bigquery.SchemaField("team_id", "INT64"),
     bigquery.SchemaField("team_abbr", "STRING"),
     bigquery.SchemaField("player_id", "INT64"),
@@ -142,7 +142,6 @@ def safe_float(x: Any) -> Optional[float]:
         return None
 
 def http_get_json(url: str, params: Optional[Dict[str, Any]] = None, timeout: int = 10) -> Dict[str, Any]:
-    """HTTP request with response debugging"""
     try:
         r = requests.get(url, params=params, headers=HEADERS, timeout=timeout)
         r.raise_for_status()
@@ -151,146 +150,69 @@ def http_get_json(url: str, params: Optional[Dict[str, Any]] = None, timeout: in
         print(f"Request failed for {url}: {e}")
         return {}
 
-def debug_json_structure(data: Dict[str, Any], prefix: str = "", max_depth: int = 3) -> None:
-    """Debug helper to understand JSON structure"""
-    if max_depth <= 0:
-        return
-    
-    for key, value in data.items():
-        current_path = f"{prefix}.{key}" if prefix else key
-        
-        if isinstance(value, dict):
-            print(f"  {current_path}: dict with keys {list(value.keys())}")
-            if max_depth > 1:
-                debug_json_structure(value, current_path, max_depth - 1)
-        elif isinstance(value, list):
-            print(f"  {current_path}: list with {len(value)} items")
-            if value and isinstance(value[0], dict) and max_depth > 1:
-                print(f"    First item keys: {list(value[0].keys())}")
-        else:
-            print(f"  {current_path}: {type(value).__name__}")
-
 # -----------------------------
-# ENHANCED ESPN Summary Parsing with DEBUG
+# FIXED: Use boxscore.players array
 # -----------------------------
-def extract_players_from_espn_summary_debug(espn_game_id: str, game_date: str, season: int) -> List[Dict[str, Any]]:
+def extract_players_from_espn_boxscore_players(espn_game_id: str, game_date: str, season: int) -> List[Dict[str, Any]]:
     """
-    Enhanced ESPN summary parsing with detailed debugging
+    FIXED: Extract player stats from ESPN's boxscore.players array
     """
     try:
-        print(f"\n--- DEBUGGING ESPN Summary for game {espn_game_id} ---")
+        print(f"\n--- Processing ESPN Summary for game {espn_game_id} ---")
         summary_data = http_get_json(ESPN_SUMMARY, params={"event": espn_game_id})
         
         if not summary_data:
-            print(f"ERROR: No summary data returned for game {espn_game_id}")
+            print(f"ERROR: No summary data for game {espn_game_id}")
             return []
         
-        print(f"Summary data keys: {list(summary_data.keys())}")
+        boxscore = summary_data.get("boxscore", {})
+        print(f"Boxscore keys: {list(boxscore.keys())}")
         
-        # Debug the structure
-        if "boxscore" in summary_data:
-            boxscore = summary_data["boxscore"]
-            print(f"Boxscore keys: {list(boxscore.keys())}")
-            
-            if "teams" in boxscore:
-                teams = boxscore["teams"]
-                print(f"Found {len(teams)} teams in boxscore")
-                
-                for i, team_data in enumerate(teams):
-                    print(f"\n--- Team {i+1} Structure ---")
-                    print(f"Team data keys: {list(team_data.keys())}")
-                    
-                    if "team" in team_data:
-                        team_info = team_data["team"]
-                        print(f"Team info: {team_info.get('abbreviation')} (ID: {team_info.get('id')})")
-                    
-                    # Check for player data locations
-                    if "statistics" in team_data:
-                        print(f"Found 'statistics' with {len(team_data['statistics'])} groups")
-                        for j, stat_group in enumerate(team_data["statistics"]):
-                            print(f"  Stat group {j}: {stat_group.get('name')} with keys {list(stat_group.keys())}")
-                            if "athletes" in stat_group:
-                                print(f"    Athletes: {len(stat_group['athletes'])} players")
-                                if stat_group["athletes"]:
-                                    first_athlete = stat_group["athletes"][0]
-                                    print(f"    First athlete keys: {list(first_athlete.keys())}")
-                                    if "athlete" in first_athlete:
-                                        print(f"    First athlete name: {first_athlete['athlete'].get('displayName')}")
-                                    if "stats" in first_athlete:
-                                        print(f"    First athlete stats: {first_athlete['stats']}")
-                    
-                    if "players" in team_data:
-                        print(f"Found 'players' with {len(team_data['players'])} players")
-                        if team_data["players"]:
-                            first_player = team_data["players"][0]
-                            print(f"  First player keys: {list(first_player.keys())}")
-            else:
-                print("No 'teams' found in boxscore")
-        else:
-            print("No 'boxscore' found in summary")
-            
-        # Now try to extract players using the debugging info
+        # NEW: Use the players array directly
+        if "players" not in boxscore:
+            print(f"ERROR: No 'players' key in boxscore for game {espn_game_id}")
+            return []
+        
+        players_array = boxscore["players"]
+        print(f"Found players array with {len(players_array)} groups")
+        
+        # Debug the players array structure
+        for i, group in enumerate(players_array):
+            print(f"  Players group {i}: keys = {list(group.keys())}")
+            if "team" in group:
+                team_info = group["team"]
+                print(f"    Team: {team_info.get('abbreviation')} (ID: {team_info.get('id')})")
+            if "athletes" in group:
+                print(f"    Athletes: {len(group['athletes'])} players")
+        
         player_stats = []
         
-        boxscore = summary_data.get("boxscore", {})
-        teams = boxscore.get("teams", [])
-        
-        print(f"\n--- EXTRACTING PLAYERS ---")
-        
-        for team_data in teams:
-            team_info = team_data.get("team", {})
+        # Process each team's players
+        for team_group in players_array:
+            team_info = team_group.get("team", {})
             team_id = safe_int(team_info.get("id"))
             team_abbr = team_info.get("abbreviation", "")
             
-            print(f"Processing team {team_abbr}")
+            athletes = team_group.get("athletes", [])
+            print(f"Processing {len(athletes)} athletes for team {team_abbr}")
             
-            players_found = []
-            
-            # Method 1: statistics with athletes
-            if "statistics" in team_data:
-                for stat_group in team_data["statistics"]:
-                    group_name = stat_group.get("name", "").lower()
-                    print(f"  Checking stat group: {group_name}")
-                    
-                    if "athletes" in stat_group:
-                        is_starter = group_name == "starters"
-                        athletes = stat_group["athletes"]
-                        print(f"    Found {len(athletes)} athletes (starters: {is_starter})")
-                        
-                        for athlete_data in athletes:
-                            athlete = athlete_data.get("athlete", {})
-                            stats = athlete_data.get("stats", [])
-                            
-                            player_name = athlete.get("displayName", "")
-                            print(f"      Player: {player_name}, Stats: {stats}")
-                            
-                            players_found.append((athlete, stats, is_starter))
-            
-            # Method 2: direct players array
-            if "players" in team_data and not players_found:
-                print(f"  Using direct players array")
-                for player in team_data["players"]:
-                    athlete = player.get("athlete", {})
-                    stats = player.get("stats", [])
-                    is_starter = player.get("starter", False)
-                    
-                    player_name = athlete.get("displayName", "")
-                    print(f"    Player: {player_name}, Stats: {stats}")
-                    
-                    players_found.append((athlete, stats, is_starter))
-            
-            print(f"Total players found for {team_abbr}: {len(players_found)}")
-            
-            # Process each player
-            for athlete, stats, is_starter in players_found:
+            for athlete_data in athletes:
+                athlete = athlete_data.get("athlete", {})
                 player_id = safe_int(athlete.get("id"))
                 player_name = athlete.get("displayName", "").strip()
                 
                 if not player_id or not player_name:
-                    print(f"    Skipping player with missing ID or name: {athlete}")
+                    print(f"    Skipping player with missing ID or name")
                     continue
                 
-                # Parse stats array
+                # Get player statistics
+                stats = athlete_data.get("stats", [])
+                starter = athlete_data.get("starter", False)
+                
+                print(f"    Player: {player_name}, Starter: {starter}, Stats: {len(stats)} items")
+                print(f"      Stats array: {stats}")
+                
+                # Parse stats array - ESPN format
                 parsed_stats = parse_espn_stats_array(stats)
                 
                 # Skip players with no minutes
@@ -306,24 +228,24 @@ def extract_players_from_espn_summary_debug(espn_game_id: str, game_date: str, s
                     'team_abbr': team_abbr,
                     'player_id': player_id,
                     'player_name': player_name,
-                    'starter': is_starter,
+                    'starter': starter,
                     **parsed_stats
                 }
                 
                 player_stats.append(player_stat)
                 print(f"    ✓ Added {player_name}: {parsed_stats.get('pts', 0)} pts, {parsed_stats.get('minutes')} min")
         
-        print(f"\nFINAL: Extracted {len(player_stats)} player stats from ESPN summary for game {espn_game_id}")
+        print(f"FINAL: Extracted {len(player_stats)} player stats from ESPN boxscore.players for game {espn_game_id}")
         return player_stats
         
     except Exception as e:
-        print(f"ERROR extracting from ESPN summary for game {espn_game_id}: {e}")
+        print(f"ERROR extracting from ESPN boxscore.players for game {espn_game_id}: {e}")
         import traceback
         traceback.print_exc()
         return []
 
 def parse_espn_stats_array(stats: List[str]) -> Dict[str, Any]:
-    """Parse ESPN stats array with debugging"""
+    """Parse ESPN stats array"""
     parsed = {
         'minutes': None, 'pts': None, 'fgm': None, 'fga': None, 'fg_pct': None,
         'fg3m': None, 'fg3a': None, 'fg3_pct': None, 'ftm': None, 'fta': None, 'ft_pct': None,
@@ -332,26 +254,24 @@ def parse_espn_stats_array(stats: List[str]) -> Dict[str, Any]:
     }
     
     if not stats or len(stats) < 14:
-        print(f"      Stats array too short: {stats}")
+        print(f"      Stats array too short or empty: {stats}")
         return parsed
     
     try:
-        # Minutes
+        # ESPN stats order: MIN, FG, 3P, FT, OREB, DREB, REB, AST, STL, BLK, TO, PF, +/-, PTS
         parsed['minutes'] = stats[0] if stats[0] and stats[0] != "--" else None
         
-        # Field Goals (format: "5-10")
+        # Parse shooting stats
         fg_made, fg_attempted, fg_pct = parse_shooting_stat(stats[1])
         parsed['fgm'] = fg_made
         parsed['fga'] = fg_attempted
         parsed['fg_pct'] = fg_pct
         
-        # Three Pointers
         three_made, three_attempted, three_pct = parse_shooting_stat(stats[2])
         parsed['fg3m'] = three_made
         parsed['fg3a'] = three_attempted
         parsed['fg3_pct'] = three_pct
         
-        # Free Throws
         ft_made, ft_attempted, ft_pct = parse_shooting_stat(stats[3])
         parsed['ftm'] = ft_made
         parsed['fta'] = ft_attempted
@@ -418,7 +338,7 @@ def get_games_for_date_fast(date_yyyymmdd: str) -> List[Dict[str, Any]]:
                 game = {
                     'game_id': event['id'],
                     'game_date': event['date'][:10],  # YYYY-MM-DD
-                    'season': safe_int(event.get('season', {}).get('year', 2025)),  # FIXED: Convert to int
+                    'season': safe_int(event.get('season', {}).get('year', 2025)),
                     'home_team_id': safe_int(home_team.get('team', {}).get('id')),
                     'home_team_abbr': home_team.get('team', {}).get('abbreviation'),
                     'home_score': safe_int(home_team.get('score')),
@@ -436,12 +356,12 @@ def get_games_for_date_fast(date_yyyymmdd: str) -> List[Dict[str, Any]]:
         print(f"Error getting games for {date_yyyymmdd}: {e}")
         return []
 
-def process_game_with_debug(game: Dict[str, Any]) -> tuple:
-    """Process a single game with debugging"""
+def process_game_with_players_array(game: Dict[str, Any]) -> tuple:
+    """Process a single game using boxscore.players array"""
     game_id = game['game_id']
     
-    # Extract player stats using enhanced debugging
-    player_stats = extract_players_from_espn_summary_debug(
+    # Extract player stats using the players array
+    player_stats = extract_players_from_espn_boxscore_players(
         game_id, 
         game['game_date'], 
         game['season']
@@ -450,7 +370,7 @@ def process_game_with_debug(game: Dict[str, Any]) -> tuple:
     return game, player_stats
 
 def process_date_fast(date_yyyymmdd: str) -> tuple:
-    """Process a date with debugging"""
+    """Process a date using the new method"""
     print(f"\n=== Processing {date_yyyymmdd} ===")
     
     # Get games
@@ -460,15 +380,15 @@ def process_date_fast(date_yyyymmdd: str) -> tuple:
         print(f"No completed games found for {date_yyyymmdd}")
         return pd.DataFrame(), pd.DataFrame()
     
-    print(f"Processing {len(games)} games with detailed debugging...")
+    print(f"Processing {len(games)} games using boxscore.players array...")
     
     all_games_data = []
     all_player_stats = []
     
-    # Process games with debugging
+    # Process games
     for game in games:
         try:
-            game_data, player_stats = process_game_with_debug(game)
+            game_data, player_stats = process_game_with_players_array(game)
             all_games_data.append(game_data)
             all_player_stats.extend(player_stats)
             
@@ -491,7 +411,7 @@ def process_date_fast(date_yyyymmdd: str) -> tuple:
     return games_df, players_df
 
 # -----------------------------
-# Data type coercion (FIXED)
+# Data type coercion
 # -----------------------------
 def coerce_games_dtypes(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
@@ -500,7 +420,7 @@ def coerce_games_dtypes(df: pd.DataFrame) -> pd.DataFrame:
 
     df["game_date"] = pd.to_datetime(df["game_date"], errors="coerce").dt.date
 
-    int_cols = ["season", "home_team_id", "home_score", "away_team_id", "away_score"]  # FIXED: season as int
+    int_cols = ["season", "home_team_id", "home_score", "away_team_id", "away_score"]
     for c in int_cols:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce").astype("Int64")
@@ -555,7 +475,7 @@ def ingest_dates_fast(ymd_list: List[str]) -> None:
     total_games = 0
     total_players = 0
     
-    print(f"Processing {len(ymd_list)} dates with full debugging...")
+    print(f"Processing {len(ymd_list)} dates using boxscore.players method...")
     
     for ymd in ymd_list:
         try:
@@ -608,7 +528,7 @@ def yyyymmdd_list(start: datetime.date, end: datetime.date) -> List[str]:
     return out
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="NBA data ingestion with full debugging")
+    parser = argparse.ArgumentParser(description="NBA data ingestion using ESPN boxscore.players array")
     parser.add_argument("--mode", choices=["backfill", "daily"], required=True)
     parser.add_argument("--start", help="YYYY-MM-DD inclusive start for backfill")
     parser.add_argument("--end", help="YYYY-MM-DD inclusive end for backfill")

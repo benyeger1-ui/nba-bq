@@ -93,7 +93,6 @@ def ensure_tables() -> None:
         BQ.get_table(games_table_id)
     except Exception:
         t = bigquery.Table(games_table_id, schema=GAMES_SCHEMA)
-        t.time_partitioning = bigquery.TimePartitioning(field="date")
         BQ.create_table(t)
 
     box_table_id = f"{PROJECT_ID}.{DATASET}.player_boxscores"
@@ -101,7 +100,6 @@ def ensure_tables() -> None:
         BQ.get_table(box_table_id)
     except Exception:
         t = bigquery.Table(box_table_id, schema=BOX_SCHEMA)
-        t.time_partitioning = bigquery.TimePartitioning(field="date")
         BQ.create_table(t)
 
 from google.cloud import bigquery
@@ -205,7 +203,7 @@ def safe_int(x: Any) -> Optional[int]:
     except Exception:
         return None
 
-def normalize_game_row(event_id: str, summary: Dict[str, Any]) -> pd.DataFrame:
+def normalize_game_row(event_id: str, summary: Dict[str, Any], fallback_date_iso: str) -> pd.DataFrame:
     header = summary.get("header", {}) or {}
     competitions = header.get("competitions", []) or []
     comp = competitions[0] if competitions else {}
@@ -226,7 +224,7 @@ def normalize_game_row(event_id: str, summary: Dict[str, Any]) -> pd.DataFrame:
     hid, habbr, hscore = team_fields(home)
     aid, aabbr, ascore = team_fields(away)
 
-    iso_date = (comp.get("date", "") or "")[:10]  # YYYY-MM-DD
+    iso_date = (comp.get("date", "") or "")[:10] or fallback_date_iso
     uid = header.get("uid")
 
     df = pd.DataFrame([{
@@ -244,12 +242,11 @@ def normalize_game_row(event_id: str, summary: Dict[str, Any]) -> pd.DataFrame:
     }])
     return coerce_games_dtypes(df)
 
-def normalize_player_box(event_id: str, summary: Dict[str, Any]) -> pd.DataFrame:
-    # Try the v2 summary structure
+def normalize_player_box(event_id: str, summary: Dict[str, Any], fallback_date_iso: str) -> pd.DataFrame:
     header = summary.get("header", {}) or {}
     competitions = header.get("competitions", []) or []
     comp = competitions[0] if competitions else {}
-    iso_date = (comp.get("date", "") or "")[:10]
+    iso_date = (comp.get("date", "") or "")[:10] or fallback_date_iso
     season = ((header.get("season") or {}).get("year"))
 
     box = (summary.get("boxscore") or {})
@@ -260,18 +257,14 @@ def normalize_player_box(event_id: str, summary: Dict[str, Any]) -> pd.DataFrame
         team = t.get("team") or {}
         tid = safe_int(team.get("id"))
         tabbr = team.get("abbreviation") or team.get("shortDisplayName")
-
         players = t.get("players", []) or []
+
         for p in players:
             ath = p.get("athlete") or {}
             pid = safe_int(ath.get("id"))
             name = ath.get("displayName")
-
-            # starter might be bool or 0/1
             starter_val = p.get("starter")
             starter = bool(starter_val) if starter_val is not None else None
-
-            # Try compact numeric dict if present
             stats2 = p.get("stats") or {}
 
             def get_int(*keys):
@@ -280,8 +273,7 @@ def normalize_player_box(event_id: str, summary: Dict[str, Any]) -> pd.DataFrame
                         return safe_int(stats2[k])
                 return None
 
-            minutes = p.get("minutes")
-            row = {
+            rows.append({
                 "event_id": event_id,
                 "date": iso_date,
                 "season": season,
@@ -290,7 +282,7 @@ def normalize_player_box(event_id: str, summary: Dict[str, Any]) -> pd.DataFrame
                 "player_id": pid,
                 "player": name,
                 "starter": starter,
-                "minutes": minutes,
+                "minutes": p.get("minutes"),
                 "pts": get_int("points", "pts"),
                 "reb": get_int("rebounds", "reb"),
                 "ast": get_int("assists", "ast"),
@@ -306,8 +298,7 @@ def normalize_player_box(event_id: str, summary: Dict[str, Any]) -> pd.DataFrame
                 "oreb": get_int("offensiveRebounds", "oreb"),
                 "dreb": get_int("defensiveRebounds", "dreb"),
                 "pf": get_int("fouls", "pf"),
-            }
-            rows.append(row)
+            })
 
     df = pd.DataFrame(rows, columns=[f.name for f in BOX_SCHEMA])
     return coerce_box_dtypes(df)
@@ -329,40 +320,51 @@ def ingest_dates(ymd_list: List[str]) -> None:
     games_frames: List[pd.DataFrame] = []
     box_frames: List[pd.DataFrame] = []
 
+    total_events = 0
+    total_games_rows = 0
+    total_box_rows = 0
+
     for ymd in ymd_list:
+        fallback_iso = f"{ymd[:4]}-{ymd[4:6]}-{ymd[6:]}"
         sb = get_scoreboard_for_date_yyyymmdd(ymd)
         event_ids = list_event_ids(sb)
-        if not event_ids:
-            # polite pause even if no games
-            time.sleep(0.2)
-            continue
+        print(f"[{fallback_iso}] events: {len(event_ids)}")
+        total_events += len(event_ids)
 
         for eid in event_ids:
             summary = get_summary(eid)
 
-            gdf = normalize_game_row(eid, summary)
-            pdf = normalize_player_box(eid, summary)
+            gdf = normalize_game_row(eid, summary, fallback_iso)
+            pdf = normalize_player_box(eid, summary, fallback_iso)
 
             if not gdf.empty:
+                total_games_rows += len(gdf)
                 games_frames.append(gdf)
             if not pdf.empty:
+                total_box_rows += len(pdf)
                 box_frames.append(pdf)
 
-            # small pause to be polite
             time.sleep(0.15)
 
-        # small pause between dates
         time.sleep(0.35)
 
     if games_frames:
         games_df = pd.concat(games_frames, ignore_index=True)
         games_df = coerce_games_dtypes(games_df)
+        print(f"loading games rows: {len(games_df)}")
         load_df(games_df, "games_daily")
+    else:
+        print("no games to load")
 
     if box_frames:
         box_df = pd.concat(box_frames, ignore_index=True)
         box_df = coerce_box_dtypes(box_df)
+        print(f"loading player box rows: {len(box_df)}")
         load_df(box_df, "player_boxscores")
+    else:
+        print("no player boxes to load")
+
+    print(f"summary - dates:{len(ymd_list)} events:{total_events} games_rows:{total_games_rows} box_rows:{total_box_rows}")
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Ingest NBA games and player box scores from ESPN free site APIs into BigQuery")

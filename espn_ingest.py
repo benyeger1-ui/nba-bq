@@ -104,16 +104,25 @@ def ensure_tables() -> None:
         t.time_partitioning = bigquery.TimePartitioning(field="date")
         BQ.create_table(t)
 
+from google.cloud import bigquery
+
 def load_df(df: pd.DataFrame, table: str) -> None:
     if df is None or df.empty:
         return
     table_id = f"{PROJECT_ID}.{DATASET}.{table}"
     schema = GAMES_SCHEMA if table == "games_daily" else BOX_SCHEMA
-    job_config = bigquery.LoadJobConfig(schema=schema, write_disposition="WRITE_APPEND")
-    # Drop any rows with missing date just to be safe
+
+    # drop rows without a date just in case
     if "date" in df.columns:
         df = df.dropna(subset=["date"])
+
+    job_config = bigquery.LoadJobConfig(
+        schema=schema,
+        write_disposition="WRITE_APPEND",
+        schema_update_options=[bigquery.SchemaUpdateOption.ALLOW_FIELD_ADDITION]
+    )
     BQ.load_table_from_dataframe(df, table_id, job_config=job_config).result()
+
 
 # -----------------------------
 # Type coercion to keep Arrow happy

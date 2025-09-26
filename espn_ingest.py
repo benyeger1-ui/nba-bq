@@ -1,267 +1,391 @@
-import os, sys, json, time, math, argparse, datetime
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import os
+import sys
+import json
+import time
+import argparse
+import datetime
+from typing import List, Optional, Dict, Any
+
 import pandas as pd
+from pandas.api.types import is_object_dtype
 import requests
-from urllib.parse import urlencode
+
 from google.cloud import bigquery
 from google.oauth2 import service_account
 
-PROJECT_ID = os.environ["GCP_PROJECT_ID"]
+# -----------------------------
+# Config via environment
+# -----------------------------
+PROJECT_ID = os.environ["GCP_PROJECT_ID"]  # set in GitHub Actions secrets
 DATASET = os.environ.get("BQ_DATASET", "nba_data")
 
+# Service account JSON is stored as a single secret string
 SA_INFO = json.loads(os.environ["GCP_SA_KEY"])
 CREDS = service_account.Credentials.from_service_account_info(SA_INFO)
 BQ = bigquery.Client(project=PROJECT_ID, credentials=CREDS)
 
+# ESPN free site APIs
 ESPN_SCOREBOARD = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard"
 ESPN_SUMMARY = "https://site.web.api.espn.com/apis/site/v2/sports/basketball/nba/summary"
 
-# ---------- BigQuery helpers ----------
-def ensure_tables():
-    # games_daily
+# -----------------------------
+# BigQuery schemas
+# -----------------------------
+GAMES_SCHEMA = [
+    bigquery.SchemaField("event_id", "STRING"),
+    bigquery.SchemaField("game_uid", "STRING"),
+    bigquery.SchemaField("date", "DATE"),
+    bigquery.SchemaField("season", "INT64"),
+    bigquery.SchemaField("status_type", "STRING"),
+    bigquery.SchemaField("home_id", "INT64"),
+    bigquery.SchemaField("home_abbr", "STRING"),
+    bigquery.SchemaField("home_score", "INT64"),
+    bigquery.SchemaField("away_id", "INT64"),
+    bigquery.SchemaField("away_abbr", "STRING"),
+    bigquery.SchemaField("away_score", "INT64"),
+]
+
+BOX_SCHEMA = [
+    bigquery.SchemaField("event_id", "STRING"),
+    bigquery.SchemaField("date", "DATE"),
+    bigquery.SchemaField("season", "INT64"),
+    bigquery.SchemaField("team_id", "INT64"),
+    bigquery.SchemaField("team_abbr", "STRING"),
+    bigquery.SchemaField("player_id", "INT64"),
+    bigquery.SchemaField("player", "STRING"),
+    bigquery.SchemaField("starter", "BOOL"),
+    bigquery.SchemaField("minutes", "STRING"),
+    bigquery.SchemaField("pts", "INT64"),
+    bigquery.SchemaField("reb", "INT64"),
+    bigquery.SchemaField("ast", "INT64"),
+    bigquery.SchemaField("stl", "INT64"),
+    bigquery.SchemaField("blk", "INT64"),
+    bigquery.SchemaField("tov", "INT64"),
+    bigquery.SchemaField("fgm", "INT64"),
+    bigquery.SchemaField("fga", "INT64"),
+    bigquery.SchemaField("fg3m", "INT64"),
+    bigquery.SchemaField("fg3a", "INT64"),
+    bigquery.SchemaField("ftm", "INT64"),
+    bigquery.SchemaField("fta", "INT64"),
+    bigquery.SchemaField("oreb", "INT64"),
+    bigquery.SchemaField("dreb", "INT64"),
+    bigquery.SchemaField("pf", "INT64"),
+]
+
+# -----------------------------
+# BigQuery helpers
+# -----------------------------
+def ensure_dataset() -> None:
+    ds_id = f"{PROJECT_ID}.{DATASET}"
+    try:
+        BQ.get_dataset(ds_id)
+    except Exception:
+        BQ.create_dataset(bigquery.Dataset(ds_id))
+
+def ensure_tables() -> None:
+    ensure_dataset()
+
     games_table_id = f"{PROJECT_ID}.{DATASET}.games_daily"
     try:
         BQ.get_table(games_table_id)
     except Exception:
-        schema = [
-            bigquery.SchemaField("event_id", "STRING"),
-            bigquery.SchemaField("game_uid", "STRING"),
-            bigquery.SchemaField("date", "DATE"),
-            bigquery.SchemaField("season", "INT64"),
-            bigquery.SchemaField("status_type", "STRING"),
-            bigquery.SchemaField("home_id", "INT64"),
-            bigquery.SchemaField("home_abbr", "STRING"),
-            bigquery.SchemaField("home_score", "INT64"),
-            bigquery.SchemaField("away_id", "INT64"),
-            bigquery.SchemaField("away_abbr", "STRING"),
-            bigquery.SchemaField("away_score", "INT64"),
-        ]
-        t = bigquery.Table(games_table_id, schema=schema)
+        t = bigquery.Table(games_table_id, schema=GAMES_SCHEMA)
         t.time_partitioning = bigquery.TimePartitioning(field="date")
         BQ.create_table(t)
 
-    # player_boxscores
-    pbox_table_id = f"{PROJECT_ID}.{DATASET}.player_boxscores"
+    box_table_id = f"{PROJECT_ID}.{DATASET}.player_boxscores"
     try:
-        BQ.get_table(pbox_table_id)
+        BQ.get_table(box_table_id)
     except Exception:
-        schema = [
-            bigquery.SchemaField("event_id", "STRING"),
-            bigquery.SchemaField("date", "DATE"),
-            bigquery.SchemaField("season", "INT64"),
-            bigquery.SchemaField("team_id", "INT64"),
-            bigquery.SchemaField("team_abbr", "STRING"),
-            bigquery.SchemaField("player_id", "INT64"),
-            bigquery.SchemaField("player", "STRING"),
-            bigquery.SchemaField("starter", "BOOL"),
-            bigquery.SchemaField("minutes", "STRING"),
-            bigquery.SchemaField("pts", "INT64"),
-            bigquery.SchemaField("reb", "INT64"),
-            bigquery.SchemaField("ast", "INT64"),
-            bigquery.SchemaField("stl", "INT64"),
-            bigquery.SchemaField("blk", "INT64"),
-            bigquery.SchemaField("tov", "INT64"),
-            bigquery.SchemaField("fgm", "INT64"),
-            bigquery.SchemaField("fga", "INT64"),
-            bigquery.SchemaField("fg3m", "INT64"),
-            bigquery.SchemaField("fg3a", "INT64"),
-            bigquery.SchemaField("ftm", "INT64"),
-            bigquery.SchemaField("fta", "INT64"),
-            bigquery.SchemaField("oreb", "INT64"),
-            bigquery.SchemaField("dreb", "INT64"),
-            bigquery.SchemaField("pf", "INT64"),
-        ]
-        t = bigquery.Table(pbox_table_id, schema=schema)
+        t = bigquery.Table(box_table_id, schema=BOX_SCHEMA)
         t.time_partitioning = bigquery.TimePartitioning(field="date")
         BQ.create_table(t)
 
-def already_loaded(table, the_date):
-    sql = f"SELECT COUNT(*) c FROM `{PROJECT_ID}.{DATASET}.{table}` WHERE date=@d"
-    job = BQ.query(sql, job_config=bigquery.QueryJobConfig(
-        query_parameters=[bigquery.ScalarQueryParameter("d","DATE",the_date)]
-    ))
-    return next(job.result()).c > 0
-
-def load_df(df, table):
+def load_df(df: pd.DataFrame, table: str) -> None:
     if df is None or df.empty:
         return
     table_id = f"{PROJECT_ID}.{DATASET}.{table}"
-    BQ.load_table_from_dataframe(df, table_id).result()
+    schema = GAMES_SCHEMA if table == "games_daily" else BOX_SCHEMA
+    job_config = bigquery.LoadJobConfig(schema=schema, write_disposition="WRITE_APPEND")
+    # Drop any rows with missing date just to be safe
+    if "date" in df.columns:
+        df = df.dropna(subset=["date"])
+    BQ.load_table_from_dataframe(df, table_id, job_config=job_config).result()
 
-# ---------- ESPN fetchers ----------
-def get_scoreboard(date_yyyymmdd=None, date_range=None):
-    # date_yyyymmdd like "20250115"
-    # date_range like "20241001-20241007"
-    params = {}
-    if date_yyyymmdd:
-        params["dates"] = date_yyyymmdd
-    if date_range:
-        params["dates"] = date_range
-    url = ESPN_SCOREBOARD + ("?" + urlencode(params) if params else "")
-    r = requests.get(url, timeout=30)
-    r.raise_for_status()
-    return r.json()
+# -----------------------------
+# Type coercion to keep Arrow happy
+# -----------------------------
+def coerce_games_dtypes(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    df = df.copy()
 
-def list_event_ids(sb_json):
-    events = sb_json.get("events", []) or []
-    ids = []
-    for e in events:
-        # event id string like "401585123"
-        ids.append(e.get("id"))
-    return [i for i in ids if i]
+    df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
 
-def fetch_summary(event_id):
-    r = requests.get(ESPN_SUMMARY, params={"event": event_id}, timeout=30)
-    r.raise_for_status()
-    return r.json()
+    int_cols = ["season", "home_id", "home_score", "away_id", "away_score"]
+    for c in int_cols:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce").astype("Int64")
 
-# ---------- Normalizers ----------
-def normalize_game_row(event_id, summary):
-    header = summary.get("header", {})
+    str_cols = ["status_type", "home_abbr", "away_abbr", "game_uid", "event_id"]
+    for c in str_cols:
+        if c in df.columns and is_object_dtype(df[c]):
+            df[c] = df[c].astype("string")
+
+    return df
+
+def coerce_box_dtypes(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    df = df.copy()
+
+    df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
+
+    if "starter" in df.columns:
+        df["starter"] = df["starter"].astype("boolean")
+
+    int_cols = [
+        "season", "team_id", "player_id", "pts", "reb", "ast", "stl", "blk", "tov",
+        "fgm", "fga", "fg3m", "fg3a", "ftm", "fta", "oreb", "dreb", "pf"
+    ]
+    for c in int_cols:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce").astype("Int64")
+
+    str_cols = ["team_abbr", "player", "minutes", "event_id"]
+    for c in str_cols:
+        if c in df.columns and is_object_dtype(df[c]):
+            df[c] = df[c].astype("string")
+
+    return df
+
+# -----------------------------
+# ESPN fetchers
+# -----------------------------
+def http_get_json(url: str, params: Optional[Dict[str, Any]] = None, max_retries: int = 3) -> Dict[str, Any]:
+    last_err = None
+    for _ in range(max_retries):
+        try:
+            r = requests.get(url, params=params, timeout=30)
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            last_err = e
+            time.sleep(0.5)
+    raise last_err if last_err else RuntimeError("request failed")
+
+def get_scoreboard_for_date_yyyymmdd(yyyymmdd: str) -> Dict[str, Any]:
+    return http_get_json(ESPN_SCOREBOARD, params={"dates": yyyymmdd})
+
+def list_event_ids(scoreboard_json: Dict[str, Any]) -> List[str]:
+    events = scoreboard_json.get("events", []) or []
+    return [e.get("id") for e in events if e.get("id")]
+
+def get_summary(event_id: str) -> Dict[str, Any]:
+    return http_get_json(ESPN_SUMMARY, params={"event": event_id})
+
+# -----------------------------
+# Normalizers
+# -----------------------------
+def safe_int(x: Any) -> Optional[int]:
+    try:
+        return int(x) if x is not None and x != "" else None
+    except Exception:
+        return None
+
+def normalize_game_row(event_id: str, summary: Dict[str, Any]) -> pd.DataFrame:
+    header = summary.get("header", {}) or {}
     competitions = header.get("competitions", []) or []
     comp = competitions[0] if competitions else {}
-    season = (header.get("season") or {}).get("year")
-    status_type = ((comp.get("status") or {}).get("type") or {}).get("name")
+    season = ((header.get("season") or {}).get("year"))
+    status_type = (((comp.get("status") or {}).get("type") or {}).get("name"))
+
     competitors = comp.get("competitors", []) or []
-    home = next((c for c in competitors if c.get("homeAway")=="home"), {})
-    away = next((c for c in competitors if c.get("homeAway")=="away"), {})
-    def team_bits(c):
+    home = next((c for c in competitors if c.get("homeAway") == "home"), {})
+    away = next((c for c in competitors if c.get("homeAway") == "away"), {})
+
+    def team_fields(c: Dict[str, Any]):
         team = c.get("team") or {}
-        abbr = team.get("abbreviation")
-        tid = int(team.get("id")) if team.get("id") else None
-        score = int(c.get("score")) if c.get("score") else None
+        abbr = team.get("abbreviation") or team.get("shortDisplayName")
+        tid = safe_int(team.get("id"))
+        score = safe_int(c.get("score"))
         return tid, abbr, score
-    hid, habbr, hscore = team_bits(home)
-    aid, aabbr, ascore = team_bits(away)
 
-    # date
-    # header["competitions"][0]["date"] is ISO. Partition by local calendar date of game.
-    iso = comp.get("date", "")[:10]  # YYYY-MM-DD
+    hid, habbr, hscore = team_fields(home)
+    aid, aabbr, ascore = team_fields(away)
 
-    return pd.DataFrame([{
+    iso_date = (comp.get("date", "") or "")[:10]  # YYYY-MM-DD
+    uid = header.get("uid")
+
+    df = pd.DataFrame([{
         "event_id": event_id,
-        "game_uid": header.get("uid"),
-        "date": iso,
+        "game_uid": uid,
+        "date": iso_date,
         "season": season,
         "status_type": status_type,
-        "home_id": hid, "home_abbr": habbr, "home_score": hscore,
-        "away_id": aid, "away_abbr": aabbr, "away_score": ascore,
+        "home_id": hid,
+        "home_abbr": habbr,
+        "home_score": hscore,
+        "away_id": aid,
+        "away_abbr": aabbr,
+        "away_score": ascore,
     }])
+    return coerce_games_dtypes(df)
 
-def normalize_player_box(event_id, summary):
+def normalize_player_box(event_id: str, summary: Dict[str, Any]) -> pd.DataFrame:
+    # Try the v2 summary structure
+    header = summary.get("header", {}) or {}
+    competitions = header.get("competitions", []) or []
+    comp = competitions[0] if competitions else {}
+    iso_date = (comp.get("date", "") or "")[:10]
+    season = ((header.get("season") or {}).get("year"))
+
     box = (summary.get("boxscore") or {})
     teams = box.get("teams", []) or []
-    rows = []
-    # teams[0]["statistics"] are aggregates. We want "players"
+    rows: List[Dict[str, Any]] = []
+
     for t in teams:
         team = t.get("team") or {}
-        tid = int(team.get("id")) if team.get("id") else None
-        tabbr = team.get("abbreviation")
+        tid = safe_int(team.get("id"))
+        tabbr = team.get("abbreviation") or team.get("shortDisplayName")
+
         players = t.get("players", []) or []
-        # Each "player" has "statistics" and "starter" etc
         for p in players:
             ath = p.get("athlete") or {}
-            pid = int(ath.get("id")) if ath.get("id") else None
+            pid = safe_int(ath.get("id"))
             name = ath.get("displayName")
-            starter = bool(p.get("starter"))
-            stats = p.get("statistics", []) or []
-            # ESPN bundles stats into groups. Find the "statistics" list with common keys.
-            # Safest: flatten all numeric-like fields if present.
-            flat = {"pts":None,"reb":None,"ast":None,"stl":None,"blk":None,"tov":None,
-                    "fgm":None,"fga":None,"fg3m":None,"fg3a":None,"ftm":None,"fta":None,
-                    "oreb":None,"dreb":None,"pf":None,"minutes":p.get("minutes")}
-            for group in stats:
-                for item in group.get("athletes", []) or []:
-                    # not needed
-                    pass
-                # Some responses use group["stats"] with strings like "FG 7-15"
-            # Many summaries provide a top-level "statistics" key under player with parsed ints
-            # Newer v2 summary often provides "stats" dict directly:
-            s2 = p.get("stats") or {}
-            def as_int(x):
-                try:
-                    return int(x) if x is not None else None
-                except:
-                    return None
-            flat["pts"]  = as_int(s2.get("points", s2.get("pts")))
-            flat["reb"]  = as_int(s2.get("rebounds", s2.get("reb")))
-            flat["ast"]  = as_int(s2.get("assists", s2.get("ast")))
-            flat["stl"]  = as_int(s2.get("steals", s2.get("stl")))
-            flat["blk"]  = as_int(s2.get("blocks", s2.get("blk")))
-            flat["tov"]  = as_int(s2.get("turnovers", s2.get("to", s2.get("tov"))))
-            flat["fgm"]  = as_int(s2.get("fieldGoalsMade", s2.get("fgm")))
-            flat["fga"]  = as_int(s2.get("fieldGoalsAttempted", s2.get("fga")))
-            flat["fg3m"] = as_int(s2.get("threePointFieldGoalsMade", s2.get("fg3m")))
-            flat["fg3a"] = as_int(s2.get("threePointFieldGoalsAttempted", s2.get("fg3a")))
-            flat["ftm"]  = as_int(s2.get("freeThrowsMade", s2.get("ftm")))
-            flat["fta"]  = as_int(s2.get("freeThrowsAttempted", s2.get("fta")))
-            flat["oreb"] = as_int(s2.get("offensiveRebounds", s2.get("oreb")))
-            flat["dreb"] = as_int(s2.get("defensiveRebounds", s2.get("dreb")))
-            flat["pf"]   = as_int(s2.get("fouls", s2.get("pf")))
-            rows.append({
-                "event_id": event_id,
-                "date": (summary.get("header",{}).get("competitions",[{}])[0].get("date","")[:10]),
-                "season": (summary.get("header",{}).get("season") or {}).get("year"),
-                "team_id": tid, "team_abbr": tabbr,
-                "player_id": pid, "player": name, "starter": starter,
-                **flat
-            })
-    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=[
-        "event_id","date","season","team_id","team_abbr","player_id","player","starter",
-        "minutes","pts","reb","ast","stl","blk","tov","fgm","fga","fg3m","fg3a","ftm","fta",
-        "oreb","dreb","pf"
-    ])
 
-# ---------- Orchestration ----------
-def ingest_for_dates(dates_list):
+            # starter might be bool or 0/1
+            starter_val = p.get("starter")
+            starter = bool(starter_val) if starter_val is not None else None
+
+            # Try compact numeric dict if present
+            stats2 = p.get("stats") or {}
+
+            def get_int(*keys):
+                for k in keys:
+                    if k in stats2 and stats2[k] is not None:
+                        return safe_int(stats2[k])
+                return None
+
+            minutes = p.get("minutes")
+            row = {
+                "event_id": event_id,
+                "date": iso_date,
+                "season": season,
+                "team_id": tid,
+                "team_abbr": tabbr,
+                "player_id": pid,
+                "player": name,
+                "starter": starter,
+                "minutes": minutes,
+                "pts": get_int("points", "pts"),
+                "reb": get_int("rebounds", "reb"),
+                "ast": get_int("assists", "ast"),
+                "stl": get_int("steals", "stl"),
+                "blk": get_int("blocks", "blk"),
+                "tov": get_int("turnovers", "to", "tov"),
+                "fgm": get_int("fieldGoalsMade", "fgm"),
+                "fga": get_int("fieldGoalsAttempted", "fga"),
+                "fg3m": get_int("threePointFieldGoalsMade", "fg3m"),
+                "fg3a": get_int("threePointFieldGoalsAttempted", "fg3a"),
+                "ftm": get_int("freeThrowsMade", "ftm"),
+                "fta": get_int("freeThrowsAttempted", "fta"),
+                "oreb": get_int("offensiveRebounds", "oreb"),
+                "dreb": get_int("defensiveRebounds", "dreb"),
+                "pf": get_int("fouls", "pf"),
+            }
+            rows.append(row)
+
+    df = pd.DataFrame(rows, columns=[f.name for f in BOX_SCHEMA])
+    return coerce_box_dtypes(df)
+
+# -----------------------------
+# Orchestration
+# -----------------------------
+def yyyymmdd_list(start: datetime.date, end: datetime.date) -> List[str]:
+    out = []
+    cur = start
+    while cur <= end:
+        out.append(cur.strftime("%Y%m%d"))
+        cur += datetime.timedelta(days=1)
+    return out
+
+def ingest_dates(ymd_list: List[str]) -> None:
     ensure_tables()
-    all_games_df = []
-    all_players_df = []
-    for ymd in dates_list:
-        # skip if games already exist for that calendar date in games_daily
-        yyyy_mm_dd = f"{ymd[:4]}-{ymd[4:6]}-{ymd[6:]}"
-        # we do not skip by partition for player_boxscores since we load both together
-        sb = get_scoreboard(date_yyyymmdd=ymd)  # ESPN scoreboard for that date
-        events = list_event_ids(sb)
-        for eid in events:
-            summary = fetch_summary(eid)
+
+    games_frames: List[pd.DataFrame] = []
+    box_frames: List[pd.DataFrame] = []
+
+    for ymd in ymd_list:
+        sb = get_scoreboard_for_date_yyyymmdd(ymd)
+        event_ids = list_event_ids(sb)
+        if not event_ids:
+            # polite pause even if no games
+            time.sleep(0.2)
+            continue
+
+        for eid in event_ids:
+            summary = get_summary(eid)
+
             gdf = normalize_game_row(eid, summary)
             pdf = normalize_player_box(eid, summary)
-            all_games_df.append(gdf)
-            all_players_df.append(pdf)
-        time.sleep(0.4)  # be polite between days
-    if all_games_df:
-        load_df(pd.concat(all_games_df, ignore_index=True), "games_daily")
-    if all_players_df:
-        load_df(pd.concat(all_players_df, ignore_index=True), "player_boxscores")
 
-def daterange(start_date, end_date):
-    cur = start_date
-    while cur <= end_date:
-        yield cur
-        cur += datetime.timedelta(days=1)
+            if not gdf.empty:
+                games_frames.append(gdf)
+            if not pdf.empty:
+                box_frames.append(pdf)
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--mode", choices=["backfill","daily"], required=True)
-    ap.add_argument("--start", help="YYYY-MM-DD for backfill start")
-    ap.add_argument("--end", help="YYYY-MM-DD for backfill end")
-    args = ap.parse_args()
+            # small pause to be polite
+            time.sleep(0.15)
+
+        # small pause between dates
+        time.sleep(0.35)
+
+    if games_frames:
+        games_df = pd.concat(games_frames, ignore_index=True)
+        games_df = coerce_games_dtypes(games_df)
+        load_df(games_df, "games_daily")
+
+    if box_frames:
+        box_df = pd.concat(box_frames, ignore_index=True)
+        box_df = coerce_box_dtypes(box_df)
+        load_df(box_df, "player_boxscores")
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Ingest NBA games and player box scores from ESPN free site APIs into BigQuery")
+    parser.add_argument("--mode", choices=["backfill", "daily"], required=True, help="backfill for a date range, daily for yesterday")
+    parser.add_argument("--start", help="YYYY-MM-DD inclusive start for backfill")
+    parser.add_argument("--end", help="YYYY-MM-DD inclusive end for backfill")
+    args = parser.parse_args()
 
     if args.mode == "daily":
-        yday = (datetime.date.today() - datetime.timedelta(days=1))
+        yday = datetime.date.today() - datetime.timedelta(days=1)
         ymd = yday.strftime("%Y%m%d")
-        ingest_for_dates([ymd])
+        ingest_dates([ymd])
+        print(f"Daily ingest complete for {ymd}")
         return
 
     if args.mode == "backfill":
         if not args.start or not args.end:
-            print("need --start and --end")
+            print("Error - backfill needs --start and --end like 2024-10-01 and 2025-06-30")
             sys.exit(1)
-        s = datetime.date.fromisoformat(args.start)
-        e = datetime.date.fromisoformat(args.end)
-        dates = [d.strftime("%Y%m%d") for d in daterange(s, e)]
-        # ESPN endpoint supports date ranges too, but single-day loop is simpler
-        ingest_for_dates(dates)
+        try:
+            s = datetime.date.fromisoformat(args.start)
+            e = datetime.date.fromisoformat(args.end)
+        except Exception:
+            print("Error - invalid date format. Use YYYY-MM-DD")
+            sys.exit(1)
+        if e < s:
+            print("Error - end date must be on or after start date")
+            sys.exit(1)
+        dates = yyyymmdd_list(s, e)
+        ingest_dates(dates)
+        print(f"Backfill complete for {args.start} to {args.end}")
+        return
 
 if __name__ == "__main__":
     main()

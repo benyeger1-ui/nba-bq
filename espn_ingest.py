@@ -15,6 +15,8 @@ import requests
 
 from google.cloud import bigquery
 from google.oauth2 import service_account
+from urllib.parse import urlencode
+
 
 # -----------------------------
 # Config via environment
@@ -30,6 +32,10 @@ BQ = bigquery.Client(project=PROJECT_ID, credentials=CREDS)
 # ESPN free site APIs
 ESPN_SCOREBOARD = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard"
 ESPN_SUMMARY = "https://site.web.api.espn.com/apis/site/v2/sports/basketball/nba/summary"
+ESPN_CORE_BOXSCORE = (
+    "https://sports.core.api.espn.com/v2/sports/basketball/leagues/nba"
+    "/events/{event}/competitions/{event}/boxscore"
+)
 
 # -----------------------------
 # BigQuery schemas
@@ -120,6 +126,77 @@ def load_df(df: pd.DataFrame, table: str) -> None:
         schema_update_options=[bigquery.SchemaUpdateOption.ALLOW_FIELD_ADDITION]
     )
     BQ.load_table_from_dataframe(df, table_id, job_config=job_config).result()
+
+def fetch_core_boxscore_players(event_id: str) -> List[Dict[str, Any]]:
+    """
+    Fallback for when site summary has no players.
+    Walks ESPN core boxscore graph and returns a flat list of player stat rows.
+    """
+    url = ESPN_CORE_BOXSCORE.format(event=event_id)
+    j = http_get_json(url)
+
+    rows: List[Dict[str, Any]] = []
+
+    # Core format: j["teams"] is a list; each team has "team" (ref) and "statistics" and "players" (list)
+    teams = j.get("teams") or []
+    for t in teams:
+        team_ref = t.get("team")  # a ref dict with "$ref"
+        team_obj = {}
+        if isinstance(team_ref, dict) and team_ref.get("$ref"):
+            team_obj = http_get_json(team_ref["$ref"])
+        team_id = safe_int(team_obj.get("id"))
+        team_abbr = team_obj.get("abbreviation") or team_obj.get("shortDisplayName")
+
+        players = t.get("players") or []
+        for p in players:
+            # each player entry is usually a dict with "athlete" (ref) and "statistics" (list)
+            ath_ref = p.get("athlete")
+            ath = {}
+            if isinstance(ath_ref, dict) and ath_ref.get("$ref"):
+                ath = http_get_json(ath_ref["$ref"])
+            player_id = safe_int(ath.get("id"))
+            player_name = ath.get("displayName")
+
+            # stats list -> normalize by "name"
+            stat_map: Dict[str, Any] = {}
+            for st in (p.get("statistics") or []):
+                name = st.get("name")
+                val = st.get("value")
+                if name:
+                    stat_map[name] = val
+
+            def gi(*keys):
+                for k in keys:
+                    if k in stat_map and stat_map[k] is not None:
+                        return safe_int(stat_map[k])
+                return None
+
+            rows.append({
+                "team_id": team_id,
+                "team_abbr": team_abbr,
+                "player_id": player_id,
+                "player": player_name,
+                "starter": bool(p.get("starter")) if p.get("starter") is not None else None,
+                "minutes": stat_map.get("minutes"),
+                "pts": gi("points","pts"),
+                "reb": gi("rebounds","reb"),
+                "ast": gi("assists","ast"),
+                "stl": gi("steals","stl"),
+                "blk": gi("blocks","blk"),
+                "tov": gi("turnovers","to","tov"),
+                "fgm": gi("fieldGoalsMade","fgm"),
+                "fga": gi("fieldGoalsAttempted","fga"),
+                "fg3m": gi("threePointFieldGoalsMade","fg3m"),
+                "fg3a": gi("threePointFieldGoalsAttempted","fg3a"),
+                "ftm": gi("freeThrowsMade","ftm"),
+                "fta": gi("freeThrowsAttempted","fta"),
+                "oreb": gi("offensiveRebounds","oreb"),
+                "dreb": gi("defensiveRebounds","dreb"),
+                "pf": gi("fouls","pf"),
+            })
+
+    return rows
+
 
 
 # -----------------------------
@@ -243,22 +320,22 @@ def normalize_game_row(event_id: str, summary: Dict[str, Any], fallback_date_iso
     return coerce_games_dtypes(df)
 
 def normalize_player_box(event_id: str, summary: Dict[str, Any], fallback_date_iso: str) -> pd.DataFrame:
+    # preferred path - site summary
     header = summary.get("header", {}) or {}
     competitions = header.get("competitions", []) or []
     comp = competitions[0] if competitions else {}
     iso_date = (comp.get("date", "") or "")[:10] or fallback_date_iso
     season = ((header.get("season") or {}).get("year"))
 
-    box = (summary.get("boxscore") or {})
-    teams = box.get("teams", []) or []
     rows: List[Dict[str, Any]] = []
 
+    box = (summary.get("boxscore") or {})
+    teams = box.get("teams", []) or []
     for t in teams:
         team = t.get("team") or {}
         tid = safe_int(team.get("id"))
         tabbr = team.get("abbreviation") or team.get("shortDisplayName")
         players = t.get("players", []) or []
-
         for p in players:
             ath = p.get("athlete") or {}
             pid = safe_int(ath.get("id"))
@@ -267,7 +344,7 @@ def normalize_player_box(event_id: str, summary: Dict[str, Any], fallback_date_i
             starter = bool(starter_val) if starter_val is not None else None
             stats2 = p.get("stats") or {}
 
-            def get_int(*keys):
+            def gi(*keys):
                 for k in keys:
                     if k in stats2 and stats2[k] is not None:
                         return safe_int(stats2[k])
@@ -283,25 +360,33 @@ def normalize_player_box(event_id: str, summary: Dict[str, Any], fallback_date_i
                 "player": name,
                 "starter": starter,
                 "minutes": p.get("minutes"),
-                "pts": get_int("points", "pts"),
-                "reb": get_int("rebounds", "reb"),
-                "ast": get_int("assists", "ast"),
-                "stl": get_int("steals", "stl"),
-                "blk": get_int("blocks", "blk"),
-                "tov": get_int("turnovers", "to", "tov"),
-                "fgm": get_int("fieldGoalsMade", "fgm"),
-                "fga": get_int("fieldGoalsAttempted", "fga"),
-                "fg3m": get_int("threePointFieldGoalsMade", "fg3m"),
-                "fg3a": get_int("threePointFieldGoalsAttempted", "fg3a"),
-                "ftm": get_int("freeThrowsMade", "ftm"),
-                "fta": get_int("freeThrowsAttempted", "fta"),
-                "oreb": get_int("offensiveRebounds", "oreb"),
-                "dreb": get_int("defensiveRebounds", "dreb"),
-                "pf": get_int("fouls", "pf"),
+                "pts": gi("points","pts"),
+                "reb": gi("rebounds","reb"),
+                "ast": gi("assists","ast"),
+                "stl": gi("steals","stl"),
+                "blk": gi("blocks","blk"),
+                "tov": gi("turnovers","to","tov"),
+                "fgm": gi("fieldGoalsMade","fgm"),
+                "fga": gi("fieldGoalsAttempted","fga"),
+                "fg3m": gi("threePointFieldGoalsMade","fg3m"),
+                "fg3a": gi("threePointFieldGoalsAttempted","fg3a"),
+                "ftm": gi("freeThrowsMade","ftm"),
+                "fta": gi("freeThrowsAttempted","fta"),
+                "oreb": gi("offensiveRebounds","oreb"),
+                "dreb": gi("defensiveRebounds","dreb"),
+                "pf": gi("fouls","pf"),
             })
 
-    df = pd.DataFrame(rows, columns=[f.name for f in BOX_SCHEMA])
+    # Fallback to core API if site summary had no players
+    if not rows:
+        core_rows = fetch_core_boxscore_players(event_id)
+        for r in core_rows:
+            r.update({"event_id": event_id, "date": iso_date, "season": season})
+        rows = core_rows
+
+    df = pd.DataFrame(rows, columns=[f.name for f in BOX_SCHEMA]) if rows else pd.DataFrame(columns=[f.name for f in BOX_SCHEMA])
     return coerce_box_dtypes(df)
+
 
 # -----------------------------
 # Orchestration
@@ -333,17 +418,20 @@ def ingest_dates(ymd_list: List[str]) -> None:
 
         for eid in event_ids:
             summary = get_summary(eid)
-
+        
             gdf = normalize_game_row(eid, summary, fallback_iso)
-            pdf = normalize_player_box(eid, summary, fallback_iso)
-
+            pdf_site = normalize_player_box(eid, summary, fallback_iso)
+        
+            if pdf_site.empty:
+                print(f"[{fallback_iso}] event {eid}: site summary had no players, tried core fallback")
+            else:
+                print(f"[{fallback_iso}] event {eid}: player rows via site/core -> {len(pdf_site)}")
+        
             if not gdf.empty:
-                total_games_rows += len(gdf)
                 games_frames.append(gdf)
-            if not pdf.empty:
-                total_box_rows += len(pdf)
-                box_frames.append(pdf)
-
+            if not pdf_site.empty:
+                box_frames.append(pdf_site)
+        
             time.sleep(0.15)
 
         time.sleep(0.35)

@@ -166,14 +166,61 @@ def safe_float(x: Any) -> Optional[float]:
     except (ValueError, TypeError):
         return None
 
-def http_get_json(url: str, params: Optional[Dict[str, Any]] = None, timeout: int = 30) -> Dict[str, Any]:
-    """Make HTTP request to Ball Don't Lie API"""
+def test_api_connection() -> bool:
+    """Test connection to Ball Don't Lie API and verify authentication"""
+    print("Testing Ball Don't Lie API connection...")
+    
+    # Try a simple endpoint first
+    test_url = f"{BALLDONTLIE_BASE}/teams"
+    test_params = {'per_page': 5}  # Just get a few teams
+    
+    data = http_get_json(test_url, test_params, timeout=15)
+    
+    if data and 'data' in data:
+        print(f"✓ API connection successful! Found {len(data['data'])} teams")
+        return True
+    else:
+        print("✗ API connection failed")
+        return False
+    """Make HTTP request to Ball Don't Lie API with enhanced error handling"""
     try:
         print(f"Making request: {url}")
         if params:
             print(f"  Params: {params}")
+        
+        # Try with API key first
+        if API_KEY:
+            headers_with_key = HEADERS.copy()
+            print(f"  Using API key authentication")
+        else:
+            headers_with_key = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            }
+            print(f"  Using no authentication (free tier)")
             
-        response = requests.get(url, params=params, headers=HEADERS, timeout=timeout)
+        response = requests.get(url, params=params, headers=headers_with_key, timeout=timeout)
+        
+        print(f"  Response status: {response.status_code}")
+        
+        # If unauthorized and we have a key, try different auth methods
+        if response.status_code == 401 and API_KEY:
+            print("  401 with Bearer token, trying X-API-Key header...")
+            headers_alt = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "X-API-Key": API_KEY
+            }
+            response = requests.get(url, params=params, headers=headers_alt, timeout=timeout)
+            print(f"  X-API-Key response status: {response.status_code}")
+        
+        # If still unauthorized, try without auth (free tier)
+        if response.status_code == 401:
+            print("  Still 401, trying without authentication...")
+            headers_no_auth = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            }
+            response = requests.get(url, params=params, headers=headers_no_auth, timeout=timeout)
+            print(f"  No auth response status: {response.status_code}")
+        
         response.raise_for_status()
         
         data = response.json()
@@ -492,6 +539,14 @@ def main() -> None:
     args = parser.parse_args()
 
     print("=== Ball Don't Lie NBA Data Pipeline ===")
+    
+    # Test API connection first
+    if not test_api_connection():
+        print("API connection test failed. Please check your API key and try again.")
+        print(f"API Key present: {'Yes' if API_KEY else 'No'}")
+        if API_KEY:
+            print(f"API Key starts with: {API_KEY[:8]}...")
+        sys.exit(1)
 
     if args.mode == "daily":
         yesterday = (datetime.date.today() - datetime.timedelta(days=1)).strftime("%Y-%m-%d")

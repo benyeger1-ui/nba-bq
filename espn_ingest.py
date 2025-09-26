@@ -21,10 +21,21 @@ from google.oauth2 import service_account
 # Config via environment
 # -----------------------------
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Authorization": f"Bearer {os.environ['BALDONTLIE_API_KEY']}"
-}
+# Get API key with fallback to free tier
+API_KEY = os.environ.get('BALDONTLIE_API_KEY') or os.environ.get('BALLDONTLIE_API_KEY')
+
+if API_KEY:
+    print(f"Using Ball Don't Lie API with authentication")
+    HEADERS = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Authorization": f"Bearer {API_KEY}"
+    }
+else:
+    print("No API key found, using Ball Don't Lie free tier")
+    print("Note: Free tier has rate limits (30 requests per minute)")
+    HEADERS = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
 
 PROJECT_ID = os.environ["GCP_PROJECT_ID"]
 DATASET = os.environ.get("BQ_DATASET", "nba_data")

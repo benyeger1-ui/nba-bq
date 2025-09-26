@@ -11,31 +11,19 @@ from typing import List, Optional, Dict, Any
 
 import pandas as pd
 from pandas.api.types import is_object_dtype
-import requests
 
 from google.cloud import bigquery
 from google.oauth2 import service_account
+
+# NBA API imports
+from nba_api.live.nba.endpoints import scoreboard
+from nba_api.live.nba.endpoints import boxscore
+from nba_api.stats.endpoints import scoreboardv2, boxscoretraditionalv2
 
 
 # -----------------------------
 # Config via environment
 # -----------------------------
-
-# Get API key with fallback to free tier
-API_KEY = os.environ.get('BALDONTLIE_API_KEY') or os.environ.get('BALLDONTLIE_API_KEY')
-
-if API_KEY:
-    print(f"Using Ball Don't Lie API with authentication")
-    HEADERS = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Authorization": f"Bearer {API_KEY}"
-    }
-else:
-    print("No API key found, using Ball Don't Lie free tier")
-    print("Note: Free tier has rate limits (30 requests per minute)")
-    HEADERS = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
 
 PROJECT_ID = os.environ["GCP_PROJECT_ID"]
 DATASET = os.environ.get("BQ_DATASET", "nba_data")
@@ -44,19 +32,13 @@ SA_INFO = json.loads(os.environ["GCP_SA_KEY"])
 CREDS = service_account.Credentials.from_service_account_info(SA_INFO)
 BQ = bigquery.Client(project=PROJECT_ID, credentials=CREDS)
 
-# Ball Don't Lie API endpoints
-BALLDONTLIE_BASE = "https://api.balldontlie.io/v1"
-BALLDONTLIE_GAMES = f"{BALLDONTLIE_BASE}/games"
-BALLDONTLIE_STATS = f"{BALLDONTLIE_BASE}/stats"
-
 # -----------------------------
 # BigQuery schemas  
 # -----------------------------
 GAMES_SCHEMA = [
-    bigquery.SchemaField("game_id", "INT64"),
+    bigquery.SchemaField("game_id", "STRING"),
     bigquery.SchemaField("game_date", "DATE"),
     bigquery.SchemaField("season", "INT64"),
-    bigquery.SchemaField("status", "STRING"),
     bigquery.SchemaField("home_team_id", "INT64"),
     bigquery.SchemaField("home_team_name", "STRING"),
     bigquery.SchemaField("home_team_abbr", "STRING"),
@@ -65,11 +47,11 @@ GAMES_SCHEMA = [
     bigquery.SchemaField("away_team_name", "STRING"),
     bigquery.SchemaField("away_team_abbr", "STRING"),
     bigquery.SchemaField("away_score", "INT64"),
+    bigquery.SchemaField("game_status", "STRING"),
 ]
 
 BOX_SCHEMA = [
-    bigquery.SchemaField("stat_id", "INT64"),
-    bigquery.SchemaField("game_id", "INT64"),
+    bigquery.SchemaField("game_id", "STRING"),
     bigquery.SchemaField("game_date", "DATE"),
     bigquery.SchemaField("season", "INT64"),
     bigquery.SchemaField("team_id", "INT64"),
@@ -77,6 +59,7 @@ BOX_SCHEMA = [
     bigquery.SchemaField("team_abbr", "STRING"),
     bigquery.SchemaField("player_id", "INT64"),
     bigquery.SchemaField("player_name", "STRING"),
+    bigquery.SchemaField("starter", "BOOL"),
     bigquery.SchemaField("minutes", "STRING"),
     bigquery.SchemaField("pts", "INT64"),
     bigquery.SchemaField("fgm", "INT64"),
@@ -94,9 +77,9 @@ BOX_SCHEMA = [
     bigquery.SchemaField("ast", "INT64"),
     bigquery.SchemaField("stl", "INT64"),
     bigquery.SchemaField("blk", "INT64"),
-    bigquery.SchemaField("turnover", "INT64"),
+    bigquery.SchemaField("tov", "INT64"),
     bigquery.SchemaField("pf", "INT64"),
-    bigquery.SchemaField("plus_minus", "STRING"),
+    bigquery.SchemaField("plus_minus", "INT64"),
 ]
 
 # -----------------------------
@@ -166,261 +149,288 @@ def safe_float(x: Any) -> Optional[float]:
     except (ValueError, TypeError):
         return None
 
-def test_api_connection() -> bool:
-    """Test connection to Ball Don't Lie API and verify authentication"""
-    print("Testing Ball Don't Lie API connection...")
-    
-    # Try a simple endpoint first
-    test_url = f"{BALLDONTLIE_BASE}/teams"
-    test_params = {'per_page': 5}  # Just get a few teams
-    
-    data = http_get_json(test_url, test_params, timeout=15)
-    
-    if data and 'data' in data:
-        print(f"✓ API connection successful! Found {len(data['data'])} teams")
-        return True
-    else:
-        print("✗ API connection failed")
-        return False
-    """Make HTTP request to Ball Don't Lie API with enhanced error handling"""
-    try:
-        print(f"Making request: {url}")
-        if params:
-            print(f"  Params: {params}")
-        
-        # Try with API key first
-        if API_KEY:
-            headers_with_key = HEADERS.copy()
-            print(f"  Using API key authentication")
-        else:
-            headers_with_key = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            }
-            print(f"  Using no authentication (free tier)")
-            
-        response = requests.get(url, params=params, headers=headers_with_key, timeout=timeout)
-        
-        print(f"  Response status: {response.status_code}")
-        
-        # If unauthorized and we have a key, try different auth methods
-        if response.status_code == 401 and API_KEY:
-            print("  401 with Bearer token, trying X-API-Key header...")
-            headers_alt = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "X-API-Key": API_KEY
-            }
-            response = requests.get(url, params=params, headers=headers_alt, timeout=timeout)
-            print(f"  X-API-Key response status: {response.status_code}")
-        
-        # If still unauthorized, try without auth (free tier)
-        if response.status_code == 401:
-            print("  Still 401, trying without authentication...")
-            headers_no_auth = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            }
-            response = requests.get(url, params=params, headers=headers_no_auth, timeout=timeout)
-            print(f"  No auth response status: {response.status_code}")
-        
-        response.raise_for_status()
-        
-        data = response.json()
-        print(f"  Response: {len(data.get('data', []))} items" if 'data' in data else "  Response received")
-        return data
-        
-    except requests.exceptions.RequestException as e:
-        print(f"Request failed for {url}: {e}")
-        return {}
-    except json.JSONDecodeError as e:
-        print(f"JSON decode error for {url}: {e}")
-        return {}
-
 # -----------------------------
-# Ball Don't Lie API Functions
+# NBA API Functions
 # -----------------------------
 def get_games_for_date(date_str: str) -> List[Dict[str, Any]]:
     """
-    Get games for a specific date using Ball Don't Lie API
-    date_str format: YYYY-MM-DD
+    Get games for a specific date using NBA API
+    date_str format: YYYY-MM-DD (MM/DD/YYYY for NBA API)
     """
-    params = {
-        'dates[]': date_str,
-        'per_page': 100  # Should be enough for one day
-    }
-    
-    data = http_get_json(BALLDONTLIE_GAMES, params=params)
-    
-    if not data or 'data' not in data:
-        print(f"No games data returned for {date_str}")
-        return []
-    
-    games = []
-    for game in data['data']:
-        # Only process completed games
-        if game.get('status') != 'Final':
-            continue
+    try:
+        # Convert date format for NBA API
+        date_obj = datetime.datetime.strptime(date_str, '%Y-%m-%d')
+        nba_date_str = date_obj.strftime('%m/%d/%Y')
+        
+        print(f"Getting games for {date_str} (NBA format: {nba_date_str})")
+        
+        # Use NBA stats API for historical data
+        scoreboard_data = scoreboardv2.ScoreboardV2(game_date=nba_date_str)
+        games_df = scoreboard_data.get_data_frames()[0]  # GameHeader dataframe
+        
+        if games_df.empty:
+            print(f"No games found for {date_str}")
+            return []
+        
+        games = []
+        for _, game_row in games_df.iterrows():
+            # Only process completed games
+            game_status = str(game_row.get('GAME_STATUS_TEXT', ''))
+            if 'Final' not in game_status:
+                continue
             
-        game_info = {
-            'game_id': safe_int(game.get('id')),
-            'game_date': date_str,
-            'season': safe_int(game.get('season')),
-            'status': game.get('status'),
-            'home_team_id': safe_int(game.get('home_team', {}).get('id')),
-            'home_team_name': game.get('home_team', {}).get('full_name'),
-            'home_team_abbr': game.get('home_team', {}).get('abbreviation'),
-            'home_score': safe_int(game.get('home_team_score')),
-            'away_team_id': safe_int(game.get('visitor_team', {}).get('id')),
-            'away_team_name': game.get('visitor_team', {}).get('full_name'),
-            'away_team_abbr': game.get('visitor_team', {}).get('abbreviation'),
-            'away_score': safe_int(game.get('visitor_team_score')),
-        }
-        games.append(game_info)
-    
-    print(f"Found {len(games)} completed games for {date_str}")
-    return games
-
-def get_stats_for_game(game_id: int, game_date: str, season: int) -> List[Dict[str, Any]]:
-    """
-    Get player statistics for a specific game using Ball Don't Lie API
-    """
-    params = {
-        'game_ids[]': game_id,
-        'per_page': 100  # Should be enough for one game
-    }
-    
-    data = http_get_json(BALLDONTLIE_STATS, params=params)
-    
-    if not data or 'data' not in data:
-        print(f"No stats data returned for game {game_id}")
-        return []
-    
-    player_stats = []
-    for stat in data['data']:
-        player_stat = {
-            'stat_id': safe_int(stat.get('id')),
-            'game_id': game_id,
-            'game_date': game_date,
-            'season': season,
-            'team_id': safe_int(stat.get('team', {}).get('id')),
-            'team_name': stat.get('team', {}).get('full_name'),
-            'team_abbr': stat.get('team', {}).get('abbreviation'),
-            'player_id': safe_int(stat.get('player', {}).get('id')),
-            'player_name': f"{stat.get('player', {}).get('first_name', '')} {stat.get('player', {}).get('last_name', '')}".strip(),
-            'minutes': stat.get('min'),
-            'pts': safe_int(stat.get('pts')),
-            'fgm': safe_int(stat.get('fgm')),
-            'fga': safe_int(stat.get('fga')),
-            'fg_pct': safe_float(stat.get('fg_pct')),
-            'fg3m': safe_int(stat.get('fg3m')),
-            'fg3a': safe_int(stat.get('fg3a')),
-            'fg3_pct': safe_float(stat.get('fg3_pct')),
-            'ftm': safe_int(stat.get('ftm')),
-            'fta': safe_int(stat.get('fta')),
-            'ft_pct': safe_float(stat.get('ft_pct')),
-            'oreb': safe_int(stat.get('oreb')),
-            'dreb': safe_int(stat.get('dreb')),
-            'reb': safe_int(stat.get('reb')),
-            'ast': safe_int(stat.get('ast')),
-            'stl': safe_int(stat.get('stl')),
-            'blk': safe_int(stat.get('blk')),
-            'turnover': safe_int(stat.get('turnover')),
-            'pf': safe_int(stat.get('pf')),
-            'plus_minus': stat.get('plus_minus'),  # Keep as string since it can be "+5", "-3", etc.
-        }
-        player_stats.append(player_stat)
-    
-    print(f"Found {len(player_stats)} player stats for game {game_id}")
-    return player_stats
-
-def get_stats_for_date_paginated(date_str: str) -> List[Dict[str, Any]]:
-    """
-    Get all player statistics for a specific date with pagination
-    This is more efficient than getting stats for each game individually
-    """
-    all_stats = []
-    page = 1
-    per_page = 100
-    
-    while True:
-        params = {
-            'dates[]': date_str,
-            'per_page': per_page,
-            'page': page
-        }
-        
-        data = http_get_json(BALLDONTLIE_STATS, params=params)
-        
-        if not data or 'data' not in data:
-            break
-        
-        stats_batch = data['data']
-        if not stats_batch:
-            break
-        
-        # Process this batch
-        for stat in stats_batch:
-            player_stat = {
-                'stat_id': safe_int(stat.get('id')),
-                'game_id': safe_int(stat.get('game', {}).get('id')),
+            game_info = {
+                'game_id': str(game_row['GAME_ID']),
                 'game_date': date_str,
-                'season': safe_int(stat.get('game', {}).get('season')),
-                'team_id': safe_int(stat.get('team', {}).get('id')),
-                'team_name': stat.get('team', {}).get('full_name'),
-                'team_abbr': stat.get('team', {}).get('abbreviation'),
-                'player_id': safe_int(stat.get('player', {}).get('id')),
-                'player_name': f"{stat.get('player', {}).get('first_name', '')} {stat.get('player', {}).get('last_name', '')}".strip(),
-                'minutes': stat.get('min'),
-                'pts': safe_int(stat.get('pts')),
-                'fgm': safe_int(stat.get('fgm')),
-                'fga': safe_int(stat.get('fga')),
-                'fg_pct': safe_float(stat.get('fg_pct')),
-                'fg3m': safe_int(stat.get('fg3m')),
-                'fg3a': safe_int(stat.get('fg3a')),
-                'fg3_pct': safe_float(stat.get('fg3_pct')),
-                'ftm': safe_int(stat.get('ftm')),
-                'fta': safe_int(stat.get('fta')),
-                'ft_pct': safe_float(stat.get('ft_pct')),
-                'oreb': safe_int(stat.get('oreb')),
-                'dreb': safe_int(stat.get('dreb')),
-                'reb': safe_int(stat.get('reb')),
-                'ast': safe_int(stat.get('ast')),
-                'stl': safe_int(stat.get('stl')),
-                'blk': safe_int(stat.get('blk')),
-                'turnover': safe_int(stat.get('turnover')),
-                'pf': safe_int(stat.get('pf')),
-                'plus_minus': stat.get('plus_minus'),
+                'season': safe_int(game_row.get('SEASON', 2025)),
+                'home_team_id': safe_int(game_row.get('HOME_TEAM_ID')),
+                'home_team_name': str(game_row.get('HOME_TEAM_NAME', '')),
+                'home_team_abbr': str(game_row.get('HOME_TEAM_ABBREVIATION', '')),
+                'home_score': safe_int(game_row.get('PTS_HOME')),
+                'away_team_id': safe_int(game_row.get('VISITOR_TEAM_ID')),
+                'away_team_name': str(game_row.get('VISITOR_TEAM_NAME', '')),
+                'away_team_abbr': str(game_row.get('VISITOR_TEAM_ABBREVIATION', '')),
+                'away_score': safe_int(game_row.get('PTS_AWAY')),
+                'game_status': game_status,
             }
-            all_stats.append(player_stat)
+            games.append(game_info)
         
-        # Check if we've got all pages
-        meta = data.get('meta', {})
-        if page >= meta.get('total_pages', 1):
-            break
+        print(f"Found {len(games)} completed games for {date_str}")
+        return games
         
-        page += 1
-        time.sleep(0.1)  # Small delay between pages
-    
-    print(f"Found {len(all_stats)} total player stats for {date_str}")
-    return all_stats
+    except Exception as e:
+        print(f"Error getting games for {date_str}: {e}")
+        return []
+
+def get_player_stats_for_game(game_id: str, game_date: str, season: int) -> List[Dict[str, Any]]:
+    """
+    Get player statistics for a specific game using NBA API
+    """
+    try:
+        print(f"Getting player stats for game {game_id}")
+        
+        # Get traditional box score stats
+        box_score_data = boxscoretraditionalv2.BoxScoreTraditionalV2(game_id=game_id)
+        player_stats_df = box_score_data.get_data_frames()[0]  # PlayerStats dataframe
+        
+        if player_stats_df.empty:
+            print(f"No player stats found for game {game_id}")
+            return []
+        
+        player_stats = []
+        for _, player_row in player_stats_df.iterrows():
+            # Skip players who didn't play
+            minutes = str(player_row.get('MIN', ''))
+            if not minutes or minutes == '0:00' or minutes.strip() == '':
+                continue
+            
+            player_stat = {
+                'game_id': game_id,
+                'game_date': game_date,
+                'season': season,
+                'team_id': safe_int(player_row.get('TEAM_ID')),
+                'team_name': str(player_row.get('TEAM_NAME', '')),
+                'team_abbr': str(player_row.get('TEAM_ABBREVIATION', '')),
+                'player_id': safe_int(player_row.get('PLAYER_ID')),
+                'player_name': str(player_row.get('PLAYER_NAME', '')),
+                'starter': str(player_row.get('START_POSITION', '')) != '',
+                'minutes': minutes,
+                'pts': safe_int(player_row.get('PTS')),
+                'fgm': safe_int(player_row.get('FGM')),
+                'fga': safe_int(player_row.get('FGA')),
+                'fg_pct': safe_float(player_row.get('FG_PCT')),
+                'fg3m': safe_int(player_row.get('FG3M')),
+                'fg3a': safe_int(player_row.get('FG3A')),
+                'fg3_pct': safe_float(player_row.get('FG3_PCT')),
+                'ftm': safe_int(player_row.get('FTM')),
+                'fta': safe_int(player_row.get('FTA')),
+                'ft_pct': safe_float(player_row.get('FT_PCT')),
+                'oreb': safe_int(player_row.get('OREB')),
+                'dreb': safe_int(player_row.get('DREB')),
+                'reb': safe_int(player_row.get('REB')),
+                'ast': safe_int(player_row.get('AST')),
+                'stl': safe_int(player_row.get('STL')),
+                'blk': safe_int(player_row.get('BLK')),
+                'tov': safe_int(player_row.get('TO')),
+                'pf': safe_int(player_row.get('PF')),
+                'plus_minus': safe_int(player_row.get('PLUS_MINUS')),
+            }
+            player_stats.append(player_stat)
+        
+        print(f"Found {len(player_stats)} player stats for game {game_id}")
+        return player_stats
+        
+    except Exception as e:
+        print(f"Error getting player stats for game {game_id}: {e}")
+        return []
+
+def get_live_scoreboard() -> List[Dict[str, Any]]:
+    """
+    Get today's games using live NBA API (for current/recent games)
+    """
+    try:
+        print("Getting live scoreboard data")
+        
+        # Get live scoreboard
+        live_scoreboard = scoreboard.ScoreBoard()
+        scoreboard_data = live_scoreboard.get_dict()
+        
+        games = []
+        today = datetime.date.today().strftime('%Y-%m-%d')
+        
+        for game in scoreboard_data.get('scoreboard', {}).get('games', []):
+            # Only process completed games
+            game_status = game.get('gameStatusText', '')
+            if 'Final' not in game_status:
+                continue
+            
+            home_team = game.get('homeTeam', {})
+            away_team = game.get('awayTeam', {})
+            
+            game_info = {
+                'game_id': str(game.get('gameId')),
+                'game_date': today,
+                'season': safe_int(game.get('season')),
+                'home_team_id': safe_int(home_team.get('teamId')),
+                'home_team_name': home_team.get('teamName', ''),
+                'home_team_abbr': home_team.get('teamTricode', ''),
+                'home_score': safe_int(home_team.get('score')),
+                'away_team_id': safe_int(away_team.get('teamId')),
+                'away_team_name': away_team.get('teamName', ''),
+                'away_team_abbr': away_team.get('teamTricode', ''),
+                'away_score': safe_int(away_team.get('score')),
+                'game_status': game_status,
+            }
+            games.append(game_info)
+        
+        print(f"Found {len(games)} completed games from live scoreboard")
+        return games
+        
+    except Exception as e:
+        print(f"Error getting live scoreboard: {e}")
+        return []
+
+def get_live_boxscore_stats(game_id: str, game_date: str, season: int) -> List[Dict[str, Any]]:
+    """
+    Get player stats using live NBA API
+    """
+    try:
+        print(f"Getting live boxscore for game {game_id}")
+        
+        # Get live boxscore
+        live_boxscore = boxscore.BoxScore(game_id=game_id)
+        boxscore_data = live_boxscore.get_dict()
+        
+        player_stats = []
+        
+        # Process both teams
+        game_data = boxscore_data.get('game', {})
+        home_team = game_data.get('homeTeam', {})
+        away_team = game_data.get('awayTeam', {})
+        
+        for team in [home_team, away_team]:
+            team_id = safe_int(team.get('teamId'))
+            team_name = team.get('teamName', '')
+            team_abbr = team.get('teamTricode', '')
+            
+            for player in team.get('players', []):
+                # Skip players who didn't play
+                if not player.get('played'):
+                    continue
+                
+                stats = player.get('statistics', {})
+                minutes = stats.get('minutes', '')
+                
+                if not minutes or minutes == 'PT0M':
+                    continue
+                
+                player_stat = {
+                    'game_id': game_id,
+                    'game_date': game_date,
+                    'season': season,
+                    'team_id': team_id,
+                    'team_name': team_name,
+                    'team_abbr': team_abbr,
+                    'player_id': safe_int(player.get('personId')),
+                    'player_name': player.get('name', ''),
+                    'starter': bool(player.get('starter')),
+                    'minutes': minutes,
+                    'pts': safe_int(stats.get('points')),
+                    'fgm': safe_int(stats.get('fieldGoalsMade')),
+                    'fga': safe_int(stats.get('fieldGoalsAttempted')),
+                    'fg_pct': safe_float(stats.get('fieldGoalsPercentage')),
+                    'fg3m': safe_int(stats.get('threePointersMade')),
+                    'fg3a': safe_int(stats.get('threePointersAttempted')),
+                    'fg3_pct': safe_float(stats.get('threePointersPercentage')),
+                    'ftm': safe_int(stats.get('freeThrowsMade')),
+                    'fta': safe_int(stats.get('freeThrowsAttempted')),
+                    'ft_pct': safe_float(stats.get('freeThrowsPercentage')),
+                    'oreb': safe_int(stats.get('reboundsOffensive')),
+                    'dreb': safe_int(stats.get('reboundsDefensive')),
+                    'reb': safe_int(stats.get('reboundsTotal')),
+                    'ast': safe_int(stats.get('assists')),
+                    'stl': safe_int(stats.get('steals')),
+                    'blk': safe_int(stats.get('blocks')),
+                    'tov': safe_int(stats.get('turnovers')),
+                    'pf': safe_int(stats.get('foulsPersonal')),
+                    'plus_minus': safe_int(stats.get('plusMinusPoints')),
+                }
+                player_stats.append(player_stat)
+        
+        print(f"Found {len(player_stats)} player stats from live boxscore for game {game_id}")
+        return player_stats
+        
+    except Exception as e:
+        print(f"Error getting live boxscore for game {game_id}: {e}")
+        return []
 
 # -----------------------------
 # Data Processing
 # -----------------------------
 def process_date(date_str: str) -> tuple:
     """
-    Process a single date using Ball Don't Lie API
+    Process a single date using NBA API
     date_str format: YYYY-MM-DD
     """
-    print(f"\n=== Processing {date_str} with Ball Don't Lie API ===")
+    print(f"\n=== Processing {date_str} with NBA API ===")
     
-    # Get games for the date
-    games = get_games_for_date(date_str)
+    # Check if this is today (use live API) or historical (use stats API)
+    today = datetime.date.today().strftime('%Y-%m-%d')
+    is_today = date_str == today
+    
+    if is_today:
+        print("Using live NBA API for today's games")
+        games = get_live_scoreboard()
+    else:
+        print("Using NBA stats API for historical games")
+        games = get_games_for_date(date_str)
     
     if not games:
         print(f"No completed games found for {date_str}")
         return pd.DataFrame(), pd.DataFrame()
     
-    # Get all player stats for the date (more efficient than per-game requests)
-    all_player_stats = get_stats_for_date_paginated(date_str)
+    # Get player stats for each game
+    all_player_stats = []
+    
+    for game in games:
+        try:
+            game_id = game['game_id']
+            season = game['season']
+            
+            if is_today:
+                # Use live boxscore API
+                player_stats = get_live_boxscore_stats(game_id, date_str, season)
+            else:
+                # Use traditional boxscore API
+                player_stats = get_player_stats_for_game(game_id, date_str, season)
+            
+            all_player_stats.extend(player_stats)
+            
+            # Rate limiting to be respectful
+            time.sleep(0.6)
+            
+        except Exception as e:
+            print(f"Error processing game {game['game_id']}: {e}")
     
     # Create DataFrames
     games_df = pd.DataFrame(games) if games else pd.DataFrame()
@@ -430,12 +440,12 @@ def process_date(date_str: str) -> tuple:
     if not games_df.empty:
         games_df["game_date"] = pd.to_datetime(games_df["game_date"]).dt.date
         
-        int_cols = ["game_id", "season", "home_team_id", "home_score", "away_team_id", "away_score"]
+        int_cols = ["season", "home_team_id", "home_score", "away_team_id", "away_score"]
         for col in int_cols:
             if col in games_df.columns:
                 games_df[col] = pd.to_numeric(games_df[col], errors="coerce").astype("Int64")
         
-        str_cols = ["status", "home_team_name", "home_team_abbr", "away_team_name", "away_team_abbr"]
+        str_cols = ["game_id", "home_team_name", "home_team_abbr", "away_team_name", "away_team_abbr", "game_status"]
         for col in str_cols:
             if col in games_df.columns:
                 games_df[col] = games_df[col].astype("string")
@@ -444,10 +454,13 @@ def process_date(date_str: str) -> tuple:
     if not players_df.empty:
         players_df["game_date"] = pd.to_datetime(players_df["game_date"]).dt.date
         
+        if "starter" in players_df.columns:
+            players_df["starter"] = players_df["starter"].astype("boolean")
+        
         int_cols = [
-            "stat_id", "game_id", "season", "team_id", "player_id", "pts", "fgm", "fga", 
-            "fg3m", "fg3a", "ftm", "fta", "oreb", "dreb", "reb", "ast", "stl", "blk", 
-            "turnover", "pf"
+            "season", "team_id", "player_id", "pts", "fgm", "fga", 
+            "fg3m", "fg3a", "ftm", "fta", "oreb", "dreb", "reb", 
+            "ast", "stl", "blk", "tov", "pf", "plus_minus"
         ]
         for col in int_cols:
             if col in players_df.columns:
@@ -458,7 +471,7 @@ def process_date(date_str: str) -> tuple:
             if col in players_df.columns:
                 players_df[col] = pd.to_numeric(players_df[col], errors="coerce").astype("Float64")
         
-        str_cols = ["team_name", "team_abbr", "player_name", "minutes", "plus_minus"]
+        str_cols = ["game_id", "team_name", "team_abbr", "player_name", "minutes"]
         for col in str_cols:
             if col in players_df.columns:
                 players_df[col] = players_df[col].astype("string")
@@ -491,7 +504,7 @@ def ingest_dates(date_list: List[str]) -> None:
                 all_box_frames.append(players_df)
                 total_players += len(players_df)
             
-            # Rate limiting - Ball Don't Lie has limits
+            # Rate limiting between dates
             time.sleep(1.0)
             
         except Exception as e:
@@ -532,21 +545,13 @@ def date_range_to_list(start_date: datetime.date, end_date: datetime.date) -> Li
     return dates
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="NBA data ingestion using Ball Don't Lie API")
+    parser = argparse.ArgumentParser(description="NBA data ingestion using official NBA API")
     parser.add_argument("--mode", choices=["backfill", "daily"], required=True)
     parser.add_argument("--start", help="YYYY-MM-DD start date for backfill")
     parser.add_argument("--end", help="YYYY-MM-DD end date for backfill")
     args = parser.parse_args()
 
-    print("=== Ball Don't Lie NBA Data Pipeline ===")
-    
-    # Test API connection first
-    if not test_api_connection():
-        print("API connection test failed. Please check your API key and try again.")
-        print(f"API Key present: {'Yes' if API_KEY else 'No'}")
-        if API_KEY:
-            print(f"API Key starts with: {API_KEY[:8]}...")
-        sys.exit(1)
+    print("=== NBA API Data Pipeline ===")
 
     if args.mode == "daily":
         yesterday = (datetime.date.today() - datetime.timedelta(days=1)).strftime("%Y-%m-%d")

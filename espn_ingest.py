@@ -21,6 +21,11 @@ from urllib.parse import urlencode
 # -----------------------------
 # Config via environment
 # -----------------------------
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+}
+
 PROJECT_ID = os.environ["GCP_PROJECT_ID"]  # set in GitHub Actions secrets
 DATASET = os.environ.get("BQ_DATASET", "nba_data")
 
@@ -36,6 +41,8 @@ ESPN_CORE_BOXSCORE = (
     "https://sports.core.api.espn.com/v2/sports/basketball/leagues/nba"
     "/events/{event}/competitions/{event}/boxscore"
 )
+ESPN_SITE_BOXSCORE = "https://site.web.api.espn.com/apis/site/v2/sports/basketball/nba/boxscore"
+
 
 # -----------------------------
 # BigQuery schemas
@@ -129,33 +136,24 @@ def load_df(df: pd.DataFrame, table: str) -> None:
 
 def fetch_core_boxscore_players(event_id: str) -> List[Dict[str, Any]]:
     """
-    Core fallback that discovers the correct boxscore URL by following $ref links:
+    Core fallback by following $ref:
     /events/{id} -> competitions[0].$ref -> boxscore.$ref
-    Returns flat player rows or [] if not available.
+    Then resolve team and athlete $ref for IDs and names.
     """
     try:
-        # 1) core event
         ev = http_get_json(f"https://sports.core.api.espn.com/v2/sports/basketball/leagues/nba/events/{event_id}")
         comps = ev.get("competitions") or []
-        if not comps:
+        if not comps or not isinstance(comps[0], dict) or not comps[0].get("$ref"):
             return []
-        comp_ref = comps[0].get("$ref")
-        if not comp_ref:
-            return []
-
-        # 2) competition
-        comp = http_get_json(comp_ref)
+        comp = http_get_json(comps[0]["$ref"])
         box_ref = (comp.get("boxscore") or {}).get("$ref")
         if not box_ref:
             return []
 
-        # 3) boxscore
         j = http_get_json(box_ref)
-
         rows: List[Dict[str, Any]] = []
         teams = j.get("teams") or []
         for t in teams:
-            # team object is a ref - resolve it
             team_ref = t.get("team")
             team_obj = {}
             if isinstance(team_ref, dict) and team_ref.get("$ref"):
@@ -163,9 +161,7 @@ def fetch_core_boxscore_players(event_id: str) -> List[Dict[str, Any]]:
             team_id = safe_int(team_obj.get("id"))
             team_abbr = team_obj.get("abbreviation") or team_obj.get("shortDisplayName")
 
-            players = t.get("players") or []
-            for p in players:
-                # athlete is a ref - resolve
+            for p in (t.get("players") or []):
                 ath_ref = p.get("athlete")
                 ath = {}
                 if isinstance(ath_ref, dict) and ath_ref.get("$ref"):
@@ -173,13 +169,11 @@ def fetch_core_boxscore_players(event_id: str) -> List[Dict[str, Any]]:
                 player_id = safe_int(ath.get("id"))
                 player_name = ath.get("displayName")
 
-                # statistics is a list of dicts with name/value
                 stat_map: Dict[str, Any] = {}
                 for st in (p.get("statistics") or []):
-                    name = st.get("name")
-                    val = st.get("value")
-                    if name:
-                        stat_map[name] = val
+                    nm, val = st.get("name"), st.get("value")
+                    if nm:
+                        stat_map[nm] = val
 
                 def gi(*keys):
                     for k in keys:
@@ -212,12 +206,77 @@ def fetch_core_boxscore_players(event_id: str) -> List[Dict[str, Any]]:
                 })
         return rows
     except requests.HTTPError as e:
-        # 404 or others - just return empty so caller can log and continue
-        print(f"core boxscore ref traversal failed for event {event_id}: {e}")
+        print(f"core boxscore traversal failed for event {event_id}: {e}")
         return []
     except Exception as e:
         print(f"core boxscore unexpected error for event {event_id}: {e}")
         return []
+
+
+def fetch_site_boxscore_players(event_id: str) -> List[Dict[str, Any]]:
+    """
+    Fallback 2 - site boxscore endpoint
+    Returns flat player rows or [].
+    """
+    try:
+        j = http_get_json(ESPN_SITE_BOXSCORE, params={"event": event_id})
+        rows: List[Dict[str, Any]] = []
+        box = j.get("boxscore") or j  # some builds put data at root under "boxscore"
+        teams = (box.get("teams") or [])
+        for t in teams:
+            team = t.get("team") or {}
+            tid = safe_int(team.get("id"))
+            tabbr = team.get("abbreviation") or team.get("shortDisplayName")
+            players = t.get("players") or []
+            for p in players:
+                ath = p.get("athlete") or {}
+                pid = safe_int(ath.get("id"))
+                name = ath.get("displayName")
+                starter = bool(p.get("starter")) if p.get("starter") is not None else None
+
+                # stats might be under "stats" or "statistics"
+                stat_map: Dict[str, Any] = {}
+                if isinstance(p.get("stats"), dict):
+                    stat_map.update(p["stats"])
+                for st in (p.get("statistics") or []):
+                    nm, val = st.get("name"), st.get("value")
+                    if nm:
+                        stat_map[nm] = val
+
+                def gi(*keys):
+                    for k in keys:
+                        if k in stat_map and stat_map[k] is not None:
+                            return safe_int(stat_map[k])
+                    return None
+
+                rows.append({
+                    "team_id": tid,
+                    "team_abbr": tabbr,
+                    "player_id": pid,
+                    "player": name,
+                    "starter": starter,
+                    "minutes": stat_map.get("minutes"),
+                    "pts": gi("points","pts"),
+                    "reb": gi("rebounds","reb"),
+                    "ast": gi("assists","ast"),
+                    "stl": gi("steals","stl"),
+                    "blk": gi("blocks","blk"),
+                    "tov": gi("turnovers","to","tov"),
+                    "fgm": gi("fieldGoalsMade","fgm"),
+                    "fga": gi("fieldGoalsAttempted","fga"),
+                    "fg3m": gi("threePointFieldGoalsMade","fg3m"),
+                    "fg3a": gi("threePointFieldGoalsAttempted","fg3a"),
+                    "ftm": gi("freeThrowsMade","ftm"),
+                    "fta": gi("freeThrowsAttempted","fta"),
+                    "oreb": gi("offensiveRebounds","oreb"),
+                    "dreb": gi("defensiveRebounds","dreb"),
+                    "pf": gi("fouls","pf"),
+                })
+        return rows
+    except Exception as e:
+        print(f"site boxscore fallback failed for event {event_id}: {e}")
+        return []
+
 
 # -----------------------------
 # Type coercion to keep Arrow happy
@@ -273,12 +332,12 @@ def http_get_json(url: str, params: Optional[Dict[str, Any]] = None, max_retries
     last_err = None
     for _ in range(max_retries):
         try:
-            r = requests.get(url, params=params, timeout=30)
+            r = requests.get(url, params=params, headers=HEADERS, timeout=30)
             r.raise_for_status()
             return r.json()
         except Exception as e:
             last_err = e
-            time.sleep(0.5)
+            time.sleep(0.6)
     raise last_err if last_err else RuntimeError("request failed")
 
 def get_scoreboard_for_date_yyyymmdd(yyyymmdd: str) -> Dict[str, Any]:
@@ -340,7 +399,6 @@ def normalize_game_row(event_id: str, summary: Dict[str, Any], fallback_date_iso
     return coerce_games_dtypes(df)
 
 def normalize_player_box(event_id: str, summary: Dict[str, Any], fallback_date_iso: str) -> pd.DataFrame:
-    # preferred path - site summary
     header = summary.get("header", {}) or {}
     competitions = header.get("competitions", []) or []
     comp = competitions[0] if competitions else {}
@@ -349,6 +407,7 @@ def normalize_player_box(event_id: str, summary: Dict[str, Any], fallback_date_i
 
     rows: List[Dict[str, Any]] = []
 
+    # source 1 - site summary
     box = (summary.get("boxscore") or {})
     teams = box.get("teams", []) or []
     for t in teams:
@@ -363,50 +422,44 @@ def normalize_player_box(event_id: str, summary: Dict[str, Any], fallback_date_i
             starter_val = p.get("starter")
             starter = bool(starter_val) if starter_val is not None else None
             stats2 = p.get("stats") or {}
-
             def gi(*keys):
                 for k in keys:
                     if k in stats2 and stats2[k] is not None:
                         return safe_int(stats2[k])
                 return None
-
             rows.append({
-                "event_id": event_id,
-                "date": iso_date,
-                "season": season,
-                "team_id": tid,
-                "team_abbr": tabbr,
-                "player_id": pid,
-                "player": name,
-                "starter": starter,
-                "minutes": p.get("minutes"),
-                "pts": gi("points","pts"),
-                "reb": gi("rebounds","reb"),
-                "ast": gi("assists","ast"),
-                "stl": gi("steals","stl"),
-                "blk": gi("blocks","blk"),
-                "tov": gi("turnovers","to","tov"),
-                "fgm": gi("fieldGoalsMade","fgm"),
-                "fga": gi("fieldGoalsAttempted","fga"),
-                "fg3m": gi("threePointFieldGoalsMade","fg3m"),
-                "fg3a": gi("threePointFieldGoalsAttempted","fg3a"),
-                "ftm": gi("freeThrowsMade","ftm"),
-                "fta": gi("freeThrowsAttempted","fta"),
-                "oreb": gi("offensiveRebounds","oreb"),
-                "dreb": gi("defensiveRebounds","dreb"),
-                "pf": gi("fouls","pf"),
+                "event_id": event_id, "date": iso_date, "season": season,
+                "team_id": tid, "team_abbr": tabbr, "player_id": pid, "player": name,
+                "starter": starter, "minutes": p.get("minutes"),
+                "pts": gi("points","pts"), "reb": gi("rebounds","reb"), "ast": gi("assists","ast"),
+                "stl": gi("steals","stl"), "blk": gi("blocks","blk"), "tov": gi("turnovers","to","tov"),
+                "fgm": gi("fieldGoalsMade","fgm"), "fga": gi("fieldGoalsAttempted","fga"),
+                "fg3m": gi("threePointFieldGoalsMade","fg3m"), "fg3a": gi("threePointFieldGoalsAttempted","fg3a"),
+                "ftm": gi("freeThrowsMade","ftm"), "fta": gi("freeThrowsAttempted","fta"),
+                "oreb": gi("offensiveRebounds","oreb"), "dreb": gi("defensiveRebounds","dreb"), "pf": gi("fouls","pf"),
             })
 
-    # Fallback to core API if site summary had no players
-    if not rows:
-        core_rows = fetch_core_boxscore_players(event_id)
-        for r in core_rows:
-            r.update({"event_id": event_id, "date": iso_date, "season": season})
-        rows = core_rows
+    if rows:
+        print(f"event {event_id}: using site summary players - {len(rows)} rows")
+    else:
+        # source 2 - core traversal
+        rows = fetch_core_boxscore_players(event_id)
+        if rows:
+            for r in rows:
+                r.update({"event_id": event_id, "date": iso_date, "season": season})
+            print(f"event {event_id}: using core boxscore players - {len(rows)} rows")
+        else:
+            # source 3 - site boxscore endpoint
+            rows = fetch_site_boxscore_players(event_id)
+            if rows:
+                for r in rows:
+                    r.update({"event_id": event_id, "date": iso_date, "season": season})
+                print(f"event {event_id}: using site boxscore fallback - {len(rows)} rows")
+            else:
+                print(f"event {event_id}: no players found in any source")
 
     df = pd.DataFrame(rows, columns=[f.name for f in BOX_SCHEMA]) if rows else pd.DataFrame(columns=[f.name for f in BOX_SCHEMA])
     return coerce_box_dtypes(df)
-
 
 # -----------------------------
 # Orchestration

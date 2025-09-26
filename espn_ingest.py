@@ -1,340 +1,569 @@
-#!/usr/bin/env python3
+# nba_live_api.py
+"""
+NBA Live Game Data API Structure
+Similar to nba_api.live but customized for our needs
+"""
 
-import os
-import sys
+from dataclasses import dataclass, field
+from typing import List, Dict, Optional, Any
+from datetime import datetime
 import json
-import datetime
-import argparse
-from typing import List, Optional, Dict, Any
+from enum import Enum
 
-import pandas as pd
-from google.cloud import bigquery
-from google.oauth2 import service_account
+class GameStatus(Enum):
+    """Game status enumeration"""
+    SCHEDULED = 1
+    LIVE = 2
+    FINAL = 3
+    POSTPONED = 4
 
-# NBA API imports
-from nba_api.stats.endpoints import scoreboardv2, boxscoretraditionalv2
+class PeriodType(Enum):
+    """Period type enumeration"""
+    REGULAR = "REGULAR"
+    OVERTIME = "OVERTIME"
 
-# -----------------------------
-# Config from environment
-# -----------------------------
-PROJECT_ID = os.environ["GCP_PROJECT_ID"]
-DATASET = os.environ.get("BQ_DATASET", "nba_data")
-SA_KEY = json.loads(os.environ["GCP_SA_KEY"])
-
-# Authenticate to BigQuery
-creds = service_account.Credentials.from_service_account_info(SA_KEY)
-bq = bigquery.Client(project=PROJECT_ID, credentials=creds)
-
-# Table names
-GAMES_TABLE = "games_daily"
-PLAYERS_TABLE = "player_boxscores"
-
-# -----------------------------
-# BigQuery setup
-# -----------------------------
-def ensure_dataset():
-    ds_id = f"{PROJECT_ID}.{DATASET}"
-    try:
-        bq.get_dataset(ds_id)
-        print(f"Dataset {ds_id} exists")
-    except Exception:
-        bq.create_dataset(ds_id)
-        print(f"Created dataset {ds_id}")
-
-def ensure_tables():
-    ensure_dataset()
+@dataclass
+class Arena:
+    """Arena information"""
+    arena_id: int
+    arena_name: str
+    arena_city: str
+    arena_state: str
+    arena_country: str
+    arena_timezone: str
     
-    # Games table
-    games_table_id = f"{PROJECT_ID}.{DATASET}.{GAMES_TABLE}"
-    try:
-        bq.get_table(games_table_id)
-        print("Games table exists")
-    except Exception:
-        games_schema = [
-            bigquery.SchemaField("game_id", "STRING"),
-            bigquery.SchemaField("date", "DATE"),
-            bigquery.SchemaField("season", "INTEGER"),
-            bigquery.SchemaField("status", "STRING"),
-            bigquery.SchemaField("home_team_id", "INTEGER"),
-            bigquery.SchemaField("home_team", "STRING"),
-            bigquery.SchemaField("home_team_score", "INTEGER"),
-            bigquery.SchemaField("visitor_team_id", "INTEGER"),
-            bigquery.SchemaField("visitor_team", "STRING"),
-            bigquery.SchemaField("visitor_team_score", "INTEGER"),
-        ]
-        table = bigquery.Table(games_table_id, schema=games_schema)
-        table.time_partitioning = bigquery.TimePartitioning(field="date")
-        bq.create_table(table)
-        print("Created games table")
-    
-    # Player boxscores table
-    players_table_id = f"{PROJECT_ID}.{DATASET}.{PLAYERS_TABLE}"
-    try:
-        bq.get_table(players_table_id)
-        print("Player boxscores table exists")
-    except Exception:
-        players_schema = [
-            bigquery.SchemaField("game_id", "STRING"),
-            bigquery.SchemaField("date", "DATE"),
-            bigquery.SchemaField("season", "INTEGER"),
-            bigquery.SchemaField("team_id", "INTEGER"),
-            bigquery.SchemaField("team_name", "STRING"),
-            bigquery.SchemaField("player_id", "INTEGER"),
-            bigquery.SchemaField("player_name", "STRING"),
-            bigquery.SchemaField("starter", "BOOL"),
-            bigquery.SchemaField("minutes", "STRING"),
-            bigquery.SchemaField("pts", "INTEGER"),
-            bigquery.SchemaField("fgm", "INTEGER"),
-            bigquery.SchemaField("fga", "INTEGER"),
-            bigquery.SchemaField("fg_pct", "FLOAT"),
-            bigquery.SchemaField("fg3m", "INTEGER"),
-            bigquery.SchemaField("fg3a", "INTEGER"),
-            bigquery.SchemaField("fg3_pct", "FLOAT"),
-            bigquery.SchemaField("ftm", "INTEGER"),
-            bigquery.SchemaField("fta", "INTEGER"),
-            bigquery.SchemaField("ft_pct", "FLOAT"),
-            bigquery.SchemaField("oreb", "INTEGER"),
-            bigquery.SchemaField("dreb", "INTEGER"),
-            bigquery.SchemaField("reb", "INTEGER"),
-            bigquery.SchemaField("ast", "INTEGER"),
-            bigquery.SchemaField("stl", "INTEGER"),
-            bigquery.SchemaField("blk", "INTEGER"),
-            bigquery.SchemaField("tov", "INTEGER"),
-            bigquery.SchemaField("pf", "INTEGER"),
-            bigquery.SchemaField("plus_minus", "INTEGER"),
-        ]
-        table = bigquery.Table(players_table_id, schema=players_schema)
-        table.time_partitioning = bigquery.TimePartitioning(field="date")
-        bq.create_table(table)
-        print("Created player boxscores table")
+    def to_dict(self) -> Dict:
+        return {
+            "arenaId": self.arena_id,
+            "arenaName": self.arena_name,
+            "arenaCity": self.arena_city,
+            "arenaState": self.arena_state,
+            "arenaCountry": self.arena_country,
+            "arenaTimezone": self.arena_timezone
+        }
 
-def already_loaded(target_date: datetime.date, table_name: str) -> bool:
-    """Check if data already exists for this date"""
-    table = f"{PROJECT_ID}.{DATASET}.{table_name}"
-    sql = f"""
-    SELECT COUNT(*) cnt
-    FROM `{table}`
-    WHERE date = @d
-    """
-    job = bq.query(sql, job_config=bigquery.QueryJobConfig(
-        query_parameters=[bigquery.ScalarQueryParameter("d", "DATE", target_date)]
-    ))
-    for row in job:
-        return row["cnt"] > 0
-    return False
-
-def load_dataframe(df: pd.DataFrame, table_name: str):
-    """Load DataFrame to BigQuery"""
-    if df.empty:
-        print(f"No data to load for {table_name}")
-        return
+@dataclass
+class Official:
+    """Game official information"""
+    person_id: int
+    name: str
+    name_i: str
+    first_name: str
+    family_name: str
+    jersey_num: str
+    assignment: str
     
-    table_id = f"{PROJECT_ID}.{DATASET}.{table_name}"
-    job = bq.load_table_from_dataframe(df, table_id)
-    job.result()
-    print(f"Loaded {len(df)} rows to {table_name}")
+    def to_dict(self) -> Dict:
+        return {
+            "personId": self.person_id,
+            "name": self.name,
+            "nameI": self.name_i,
+            "firstName": self.first_name,
+            "familyName": self.family_name,
+            "jerseyNum": self.jersey_num,
+            "assignment": self.assignment
+        }
 
-# -----------------------------
-# NBA API functions
-# -----------------------------
-def safe_int(x):
-    """Safely convert to int"""
-    try:
-        return int(x) if x is not None and str(x).strip() != '' else None
-    except:
-        return None
+@dataclass
+class PlayerStatistics:
+    """Player game statistics"""
+    minutes: str = "PT00M00.00S"
+    seconds: int = 0
+    points: int = 0
+    assists: int = 0
+    rebounds: int = 0
+    rebounds_defensive: int = 0
+    rebounds_offensive: int = 0
+    steals: int = 0
+    blocks: int = 0
+    turnovers: int = 0
+    field_goals_made: int = 0
+    field_goals_attempted: int = 0
+    field_goals_percentage: float = 0.0
+    three_pointers_made: int = 0
+    three_pointers_attempted: int = 0
+    three_pointers_percentage: float = 0.0
+    free_throws_made: int = 0
+    free_throws_attempted: int = 0
+    free_throws_percentage: float = 0.0
+    fouls_personal: int = 0
+    fouls_technical: int = 0
+    fouls_offensive: int = 0
+    fouls_drawn: int = 0
+    plus_minus: int = 0
+    
+    def to_dict(self) -> Dict:
+        return {
+            "minutes": self.minutes,
+            "seconds": self.seconds,
+            "points": self.points,
+            "assists": self.assists,
+            "reboundsTotal": self.rebounds,
+            "reboundsDefensive": self.rebounds_defensive,
+            "reboundsOffensive": self.rebounds_offensive,
+            "steals": self.steals,
+            "blocks": self.blocks,
+            "turnovers": self.turnovers,
+            "fieldGoalsMade": self.field_goals_made,
+            "fieldGoalsAttempted": self.field_goals_attempted,
+            "fieldGoalsPercentage": self.field_goals_percentage,
+            "threePointersMade": self.three_pointers_made,
+            "threePointersAttempted": self.three_pointers_attempted,
+            "threePointersPercentage": self.three_pointers_percentage,
+            "freeThrowsMade": self.free_throws_made,
+            "freeThrowsAttempted": self.free_throws_attempted,
+            "freeThrowsPercentage": self.free_throws_percentage,
+            "foulsPersonal": self.fouls_personal,
+            "foulsTechnical": self.fouls_technical,
+            "foulsOffensive": self.fouls_offensive,
+            "foulsDrawn": self.fouls_drawn,
+            "plusMinusPoints": self.plus_minus
+        }
 
-def safe_float(x):
-    """Safely convert to float"""
-    try:
-        return float(x) if x is not None and str(x).strip() != '' else None
-    except:
-        return None
+@dataclass
+class Player:
+    """Player information with statistics"""
+    person_id: int
+    name: str
+    name_i: str
+    first_name: str
+    family_name: str
+    jersey_num: str
+    position: str
+    status: str = "ACTIVE"
+    order: int = 0
+    starter: str = "0"
+    oncourt: str = "0"
+    played: str = "0"
+    statistics: PlayerStatistics = field(default_factory=PlayerStatistics)
+    
+    def to_dict(self) -> Dict:
+        return {
+            "status": self.status,
+            "order": self.order,
+            "personId": self.person_id,
+            "name": self.name,
+            "nameI": self.name_i,
+            "firstName": self.first_name,
+            "familyName": self.family_name,
+            "jerseyNum": self.jersey_num,
+            "position": self.position,
+            "starter": self.starter,
+            "oncourt": self.oncourt,
+            "played": self.played,
+            "statistics": self.statistics.to_dict()
+        }
 
-def get_games_for_date(date_str: str) -> List[Dict[str, Any]]:
-    """
-    Get games for date using NBA API
-    date_str: YYYY-MM-DD format
-    """
-    try:
-        # Convert to MM/DD/YYYY for NBA API
-        date_obj = datetime.datetime.strptime(date_str, '%Y-%m-%d')
-        nba_date = date_obj.strftime('%m/%d/%Y')
-        
-        print(f"Getting games for {date_str} (NBA format: {nba_date})")
-        
-        # Get scoreboard data
-        scoreboard_data = scoreboardv2.ScoreboardV2(game_date=nba_date)
-        games_df = scoreboard_data.get_data_frames()[0]  # GameHeader
-        
-        games = []
-        for _, row in games_df.iterrows():
-            # Only process completed games
-            status = str(row.get('GAME_STATUS_TEXT', ''))
-            if 'Final' not in status:
-                continue
-                
-            game = {
-                'game_id': str(row['GAME_ID']),
-                'date': date_str,
-                'season': safe_int(row.get('SEASON')),
-                'status': status,
-                'home_team_id': safe_int(row.get('HOME_TEAM_ID')),
-                'home_team': str(row.get('HOME_TEAM_ABBREVIATION', '')),
-                'home_team_score': safe_int(row.get('PTS_HOME')),
-                'visitor_team_id': safe_int(row.get('VISITOR_TEAM_ID')),
-                'visitor_team': str(row.get('VISITOR_TEAM_ABBREVIATION', '')),
-                'visitor_team_score': safe_int(row.get('PTS_AWAY')),
-            }
-            games.append(game)
-        
-        print(f"Found {len(games)} completed games")
-        return games
-        
-    except Exception as e:
-        print(f"Error getting games: {e}")
-        return []
+@dataclass
+class Period:
+    """Period/Quarter information"""
+    period: int
+    period_type: PeriodType
+    score: int
+    
+    def to_dict(self) -> Dict:
+        return {
+            "period": self.period,
+            "periodType": self.period_type.value,
+            "score": self.score
+        }
 
-def get_player_stats_for_game(game_id: str, date_str: str, season: int) -> List[Dict[str, Any]]:
-    """Get player stats for a game"""
-    try:
-        print(f"Getting player stats for game {game_id}")
-        
-        # Get boxscore data
-        box_data = boxscoretraditionalv2.BoxScoreTraditionalV2(game_id=game_id)
-        players_df = box_data.get_data_frames()[0]  # PlayerStats
-        
-        player_stats = []
-        for _, row in players_df.iterrows():
-            # Skip players who didn't play
-            minutes = str(row.get('MIN', ''))
-            if not minutes or minutes == '0:00':
-                continue
-            
-            stat = {
-                'game_id': game_id,
-                'date': date_str,
-                'season': season,
-                'team_id': safe_int(row.get('TEAM_ID')),
-                'team_name': str(row.get('TEAM_ABBREVIATION', '')),
-                'player_id': safe_int(row.get('PLAYER_ID')),
-                'player_name': str(row.get('PLAYER_NAME', '')),
-                'starter': str(row.get('START_POSITION', '')) != '',
-                'minutes': minutes,
-                'pts': safe_int(row.get('PTS')),
-                'fgm': safe_int(row.get('FGM')),
-                'fga': safe_int(row.get('FGA')),
-                'fg_pct': safe_float(row.get('FG_PCT')),
-                'fg3m': safe_int(row.get('FG3M')),
-                'fg3a': safe_int(row.get('FG3A')),
-                'fg3_pct': safe_float(row.get('FG3_PCT')),
-                'ftm': safe_int(row.get('FTM')),
-                'fta': safe_int(row.get('FTA')),
-                'ft_pct': safe_float(row.get('FT_PCT')),
-                'oreb': safe_int(row.get('OREB')),
-                'dreb': safe_int(row.get('DREB')),
-                'reb': safe_int(row.get('REB')),
-                'ast': safe_int(row.get('AST')),
-                'stl': safe_int(row.get('STL')),
-                'blk': safe_int(row.get('BLK')),
-                'tov': safe_int(row.get('TO')),
-                'pf': safe_int(row.get('PF')),
-                'plus_minus': safe_int(row.get('PLUS_MINUS')),
-            }
-            player_stats.append(stat)
-        
-        print(f"Found {len(player_stats)} player stats")
-        return player_stats
-        
-    except Exception as e:
-        print(f"Error getting player stats for {game_id}: {e}")
-        return []
+@dataclass
+class TeamStatistics:
+    """Team game statistics"""
+    points: int = 0
+    field_goals_made: int = 0
+    field_goals_attempted: int = 0
+    field_goals_percentage: float = 0.0
+    three_pointers_made: int = 0
+    three_pointers_attempted: int = 0
+    three_pointers_percentage: float = 0.0
+    free_throws_made: int = 0
+    free_throws_attempted: int = 0
+    free_throws_percentage: float = 0.0
+    rebounds_total: int = 0
+    rebounds_offensive: int = 0
+    rebounds_defensive: int = 0
+    assists: int = 0
+    steals: int = 0
+    blocks: int = 0
+    turnovers: int = 0
+    fouls_personal: int = 0
+    fouls_technical: int = 0
+    
+    def to_dict(self) -> Dict:
+        return {
+            "points": self.points,
+            "fieldGoalsMade": self.field_goals_made,
+            "fieldGoalsAttempted": self.field_goals_attempted,
+            "fieldGoalsPercentage": self.field_goals_percentage,
+            "threePointersMade": self.three_pointers_made,
+            "threePointersAttempted": self.three_pointers_attempted,
+            "threePointersPercentage": self.three_pointers_percentage,
+            "freeThrowsMade": self.free_throws_made,
+            "freeThrowsAttempted": self.free_throws_attempted,
+            "freeThrowsPercentage": self.free_throws_percentage,
+            "reboundsTotal": self.rebounds_total,
+            "reboundsOffensive": self.rebounds_offensive,
+            "reboundsDefensive": self.rebounds_defensive,
+            "assists": self.assists,
+            "steals": self.steals,
+            "blocks": self.blocks,
+            "turnovers": self.turnovers,
+            "foulsPersonal": self.fouls_personal,
+            "foulsTechnical": self.fouls_technical
+        }
 
-# -----------------------------
-# Main processing
-# -----------------------------
-def process_date(date_str: str):
-    """Process games and player stats for a date"""
-    print(f"\n=== Processing {date_str} ===")
+@dataclass
+class Team:
+    """Team information with players and statistics"""
+    team_id: int
+    team_name: str
+    team_city: str
+    team_tricode: str
+    score: int = 0
+    in_bonus: str = "0"
+    timeouts_remaining: int = 7
+    periods: List[Period] = field(default_factory=list)
+    players: List[Player] = field(default_factory=list)
+    statistics: TeamStatistics = field(default_factory=TeamStatistics)
     
-    date_obj = datetime.datetime.strptime(date_str, '%Y-%m-%d').date()
+    def to_dict(self) -> Dict:
+        return {
+            "teamId": self.team_id,
+            "teamName": self.team_name,
+            "teamCity": self.team_city,
+            "teamTricode": self.team_tricode,
+            "score": self.score,
+            "inBonus": self.in_bonus,
+            "timeoutsRemaining": self.timeouts_remaining,
+            "periods": [p.to_dict() for p in self.periods],
+            "players": [p.to_dict() for p in self.players],
+            "statistics": self.statistics.to_dict()
+        }
+
+@dataclass
+class Game:
+    """Complete game information"""
+    game_id: str
+    game_code: str
+    game_status: GameStatus
+    game_status_text: str
+    period: int
+    game_clock: str
+    game_time_utc: datetime
+    game_time_local: datetime
+    game_time_home: datetime
+    game_time_away: datetime
+    game_time_et: datetime
+    duration: int = 0
+    regulation_periods: int = 4
+    attendance: int = 0
+    sellout: str = "0"
+    arena: Optional[Arena] = None
+    officials: List[Official] = field(default_factory=list)
+    home_team: Optional[Team] = None
+    away_team: Optional[Team] = None
     
-    # Check if already loaded
-    if already_loaded(date_obj, GAMES_TABLE):
-        print(f"Games already loaded for {date_str}")
-        return
+    def to_dict(self) -> Dict:
+        return {
+            "gameId": self.game_id,
+            "gameCode": self.game_code,
+            "gameStatus": self.game_status.value,
+            "gameStatusText": self.game_status_text,
+            "period": self.period,
+            "gameClock": self.game_clock,
+            "gameTimeUTC": self.game_time_utc.isoformat() + "Z",
+            "gameTimeLocal": self.game_time_local.isoformat(),
+            "gameTimeHome": self.game_time_home.isoformat(),
+            "gameTimeAway": self.game_time_away.isoformat(),
+            "gameEt": self.game_time_et.isoformat(),
+            "duration": self.duration,
+            "regulationPeriods": self.regulation_periods,
+            "attendance": self.attendance,
+            "sellout": self.sellout,
+            "arena": self.arena.to_dict() if self.arena else None,
+            "officials": [o.to_dict() for o in self.officials],
+            "homeTeam": self.home_team.to_dict() if self.home_team else None,
+            "awayTeam": self.away_team.to_dict() if self.away_team else None
+        }
+
+@dataclass
+class BoxScore:
+    """Complete box score response"""
+    meta: Dict[str, Any]
+    game: Game
     
-    # Get games
-    games = get_games_for_date(date_str)
-    if not games:
-        print(f"No games found for {date_str}")
-        return
+    def to_dict(self) -> Dict:
+        return {
+            "meta": self.meta,
+            "game": self.game.to_dict()
+        }
     
-    # Create games DataFrame
-    games_df = pd.DataFrame(games)
-    games_df['date'] = pd.to_datetime(games_df['date']).dt.date
+    def to_json(self) -> str:
+        """Convert to JSON string"""
+        return json.dumps(self.to_dict(), indent=2, default=str)
     
-    # Get all player stats
-    all_player_stats = []
-    for game in games:
-        player_stats = get_player_stats_for_game(
-            game['game_id'], 
-            date_str, 
-            game['season']
+    @classmethod
+    def from_dict(cls, data: Dict) -> 'BoxScore':
+        """Create BoxScore from dictionary"""
+        # Parse meta
+        meta = data.get("meta", {})
+        
+        # Parse game data
+        game_data = data.get("game", {})
+        
+        # Parse arena
+        arena_data = game_data.get("arena")
+        arena = None
+        if arena_data:
+            arena = Arena(
+                arena_id=arena_data.get("arenaId"),
+                arena_name=arena_data.get("arenaName"),
+                arena_city=arena_data.get("arenaCity"),
+                arena_state=arena_data.get("arenaState"),
+                arena_country=arena_data.get("arenaCountry"),
+                arena_timezone=arena_data.get("arenaTimezone")
+            )
+        
+        # Parse officials
+        officials = []
+        for off_data in game_data.get("officials", []):
+            officials.append(Official(
+                person_id=off_data.get("personId"),
+                name=off_data.get("name"),
+                name_i=off_data.get("nameI"),
+                first_name=off_data.get("firstName"),
+                family_name=off_data.get("familyName"),
+                jersey_num=off_data.get("jerseyNum"),
+                assignment=off_data.get("assignment")
+            ))
+        
+        # Parse teams
+        home_team = cls._parse_team(game_data.get("homeTeam"))
+        away_team = cls._parse_team(game_data.get("awayTeam"))
+        
+        # Create game
+        game = Game(
+            game_id=game_data.get("gameId"),
+            game_code=game_data.get("gameCode"),
+            game_status=GameStatus(game_data.get("gameStatus", 1)),
+            game_status_text=game_data.get("gameStatusText"),
+            period=game_data.get("period"),
+            game_clock=game_data.get("gameClock"),
+            game_time_utc=datetime.fromisoformat(game_data.get("gameTimeUTC", "").replace("Z", "+00:00")),
+            game_time_local=datetime.fromisoformat(game_data.get("gameTimeLocal", "")),
+            game_time_home=datetime.fromisoformat(game_data.get("gameTimeHome", "")),
+            game_time_away=datetime.fromisoformat(game_data.get("gameTimeAway", "")),
+            game_time_et=datetime.fromisoformat(game_data.get("gameEt", "")),
+            duration=game_data.get("duration", 0),
+            regulation_periods=game_data.get("regulationPeriods", 4),
+            attendance=game_data.get("attendance", 0),
+            sellout=game_data.get("sellout", "0"),
+            arena=arena,
+            officials=officials,
+            home_team=home_team,
+            away_team=away_team
         )
-        all_player_stats.extend(player_stats)
         
-        # Rate limiting
-        import time
-        time.sleep(0.6)
+        return cls(meta=meta, game=game)
     
-    # Create player stats DataFrame
-    if all_player_stats:
-        players_df = pd.DataFrame(all_player_stats)
-        players_df['date'] = pd.to_datetime(players_df['date']).dt.date
-    else:
-        players_df = pd.DataFrame()
-    
-    # Load to BigQuery
-    load_dataframe(games_df, GAMES_TABLE)
-    if not players_df.empty:
-        load_dataframe(players_df, PLAYERS_TABLE)
-    
-    print(f"Completed {date_str}: {len(games_df)} games, {len(players_df)} player stats")
-
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=["daily", "backfill"], required=True)
-    parser.add_argument("--start", help="Start date YYYY-MM-DD")
-    parser.add_argument("--end", help="End date YYYY-MM-DD")
-    args = parser.parse_args()
-    
-    ensure_tables()
-    
-    if args.mode == "daily":
-        # Process yesterday
-        yesterday = (datetime.date.today() - datetime.timedelta(days=1)).strftime('%Y-%m-%d')
-        print(f"Processing yesterday: {yesterday}")
-        process_date(yesterday)
+    @staticmethod
+    def _parse_team(team_data: Optional[Dict]) -> Optional[Team]:
+        """Parse team data from dictionary"""
+        if not team_data:
+            return None
         
-    elif args.mode == "backfill":
-        if not args.start or not args.end:
-            print("Backfill requires --start and --end dates")
-            sys.exit(1)
+        # Parse periods
+        periods = []
+        for period_data in team_data.get("periods", []):
+            periods.append(Period(
+                period=period_data.get("period"),
+                period_type=PeriodType(period_data.get("periodType", "REGULAR")),
+                score=period_data.get("score")
+            ))
         
-        start_date = datetime.datetime.strptime(args.start, '%Y-%m-%d').date()
-        end_date = datetime.datetime.strptime(args.end, '%Y-%m-%d').date()
-        
-        current = start_date
-        while current <= end_date:
-            process_date(current.strftime('%Y-%m-%d'))
-            current += datetime.timedelta(days=1)
+        # Parse players
+        players = []
+        for player_data in team_data.get("players", []):
+            stats_data = player_data.get("statistics", {})
+            stats = PlayerStatistics(
+                minutes=stats_data.get("minutes", "PT00M00.00S"),
+                seconds=stats_data.get("seconds", 0),
+                points=stats_data.get("points", 0),
+                assists=stats_data.get("assists", 0),
+                rebounds=stats_data.get("reboundsTotal", 0),
+                rebounds_defensive=stats_data.get("reboundsDefensive", 0),
+                rebounds_offensive=stats_data.get("reboundsOffensive", 0),
+                steals=stats_data.get("steals", 0),
+                blocks=stats_data.get("blocks", 0),
+                turnovers=stats_data.get("turnovers", 0),
+                field_goals_made=stats_data.get("fieldGoalsMade", 0),
+                field_goals_attempted=stats_data.get("fieldGoalsAttempted", 0),
+                field_goals_percentage=stats_data.get("fieldGoalsPercentage", 0.0),
+                three_pointers_made=stats_data.get("threePointersMade", 0),
+                three_pointers_attempted=stats_data.get("threePointersAttempted", 0),
+                three_pointers_percentage=stats_data.get("threePointersPercentage", 0.0),
+                free_throws_made=stats_data.get("freeThrowsMade", 0),
+                free_throws_attempted=stats_data.get("freeThrowsAttempted", 0),
+                free_throws_percentage=stats_data.get("freeThrowsPercentage", 0.0),
+                fouls_personal=stats_data.get("foulsPersonal", 0),
+                fouls_technical=stats_data.get("foulsTechnical", 0),
+                fouls_offensive=stats_data.get("foulsOffensive", 0),
+                fouls_drawn=stats_data.get("foulsDrawn", 0),
+                plus_minus=stats_data.get("plusMinusPoints", 0)
+            )
             
-            # Rate limiting between dates
-            import time
-            time.sleep(1.0)
-    
-    print("Processing completed!")
+            players.append(Player(
+                person_id=player_data.get("personId"),
+                name=player_data.get("name", ""),
+                name_i=player_data.get("nameI", ""),
+                first_name=player_data.get("firstName", ""),
+                family_name=player_data.get("familyName", ""),
+                jersey_num=player_data.get("jerseyNum", ""),
+                position=player_data.get("position", ""),
+                status=player_data.get("status", "ACTIVE"),
+                order=player_data.get("order", 0),
+                starter=player_data.get("starter", "0"),
+                oncourt=player_data.get("oncourt", "0"),
+                played=player_data.get("played", "0"),
+                statistics=stats
+            ))
+        
+        # Parse team statistics
+        team_stats_data = team_data.get("statistics", {})
+        team_stats = TeamStatistics(
+            points=team_stats_data.get("points", 0),
+            field_goals_made=team_stats_data.get("fieldGoalsMade", 0),
+            field_goals_attempted=team_stats_data.get("fieldGoalsAttempted", 0),
+            field_goals_percentage=team_stats_data.get("fieldGoalsPercentage", 0.0),
+            three_pointers_made=team_stats_data.get("threePointersMade", 0),
+            three_pointers_attempted=team_stats_data.get("threePointersAttempted", 0),
+            three_pointers_percentage=team_stats_data.get("threePointersPercentage", 0.0),
+            free_throws_made=team_stats_data.get("freeThrowsMade", 0),
+            free_throws_attempted=team_stats_data.get("freeThrowsAttempted", 0),
+            free_throws_percentage=team_stats_data.get("freeThrowsPercentage", 0.0),
+            rebounds_total=team_stats_data.get("reboundsTotal", 0),
+            rebounds_offensive=team_stats_data.get("reboundsOffensive", 0),
+            rebounds_defensive=team_stats_data.get("reboundsDefensive", 0),
+            assists=team_stats_data.get("assists", 0),
+            steals=team_stats_data.get("steals", 0),
+            blocks=team_stats_data.get("blocks", 0),
+            turnovers=team_stats_data.get("turnovers", 0),
+            fouls_personal=team_stats_data.get("foulsPersonal", 0),
+            fouls_technical=team_stats_data.get("foulsTechnical", 0)
+        )
+        
+        return Team(
+            team_id=team_data.get("teamId"),
+            team_name=team_data.get("teamName"),
+            team_city=team_data.get("teamCity"),
+            team_tricode=team_data.get("teamTricode"),
+            score=team_data.get("score", 0),
+            in_bonus=team_data.get("inBonus", "0"),
+            timeouts_remaining=team_data.get("timeoutsRemaining", 7),
+            periods=periods,
+            players=players,
+            statistics=team_stats
+        )
 
+
+# Example usage
 if __name__ == "__main__":
-    main()
+    # Create sample data
+    sample_arena = Arena(
+        arena_id=17,
+        arena_name="TD Garden",
+        arena_city="Boston",
+        arena_state="MA",
+        arena_country="US",
+        arena_timezone="America/New_York"
+    )
+    
+    sample_official = Official(
+        person_id=201638,
+        name="Brent Barnaky",
+        name_i="B. Barnaky",
+        first_name="Brent",
+        family_name="Barnaky",
+        jersey_num="36",
+        assignment="OFFICIAL1"
+    )
+    
+    sample_player_stats = PlayerStatistics(
+        minutes="PT32M45.00S",
+        seconds=1965,
+        points=25,
+        assists=8,
+        rebounds=7,
+        field_goals_made=9,
+        field_goals_attempted=18,
+        field_goals_percentage=0.5,
+        three_pointers_made=3,
+        three_pointers_attempted=8,
+        three_pointers_percentage=0.375,
+        free_throws_made=4,
+        free_throws_attempted=4,
+        free_throws_percentage=1.0
+    )
+    
+    sample_player = Player(
+        person_id=1627759,
+        name="Jaylen Brown",
+        name_i="J. Brown",
+        first_name="Jaylen",
+        family_name="Brown",
+        jersey_num="7",
+        position="SF",
+        starter="1",
+        played="1",
+        statistics=sample_player_stats
+    )
+    
+    sample_period = Period(
+        period=1,
+        period_type=PeriodType.REGULAR,
+        score=34
+    )
+    
+    sample_team = Team(
+        team_id=1610612738,
+        team_name="Celtics",
+        team_city="Boston",
+        team_tricode="BOS",
+        score=124,
+        in_bonus="1",
+        timeouts_remaining=2,
+        periods=[sample_period],
+        players=[sample_player]
+    )
+    
+    sample_game = Game(
+        game_id="0022000180",
+        game_code="20210115/ORLBOS",
+        game_status=GameStatus.FINAL,
+        game_status_text="Final",
+        period=4,
+        game_clock="PT00M00.00S",
+        game_time_utc=datetime.fromisoformat("2021-01-16T00:30:00+00:00"),
+        game_time_local=datetime.fromisoformat("2021-01-15T19:30:00-05:00"),
+        game_time_home=datetime.fromisoformat("2021-01-15T19:30:00-05:00"),
+        game_time_away=datetime.fromisoformat("2021-01-15T19:30:00-05:00"),
+        game_time_et=datetime.fromisoformat("2021-01-15T19:30:00-05:00"),
+        duration=125,
+        arena=sample_arena,
+        officials=[sample_official],
+        home_team=sample_team
+    )
+    
+    sample_meta = {
+        "version": 1,
+        "code": 200,
+        "request": "http://nba.cloud/games/0022000180/boxscore?Format=json",
+        "time": "2021-01-15 23:51:25.282704"
+    }
+    
+    box_score = BoxScore(meta=sample_meta, game=sample_game)
+    
+    # Convert to JSON
+    print(box_score.to_json())

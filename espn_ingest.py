@@ -129,75 +129,95 @@ def load_df(df: pd.DataFrame, table: str) -> None:
 
 def fetch_core_boxscore_players(event_id: str) -> List[Dict[str, Any]]:
     """
-    Fallback for when site summary has no players.
-    Walks ESPN core boxscore graph and returns a flat list of player stat rows.
+    Core fallback that discovers the correct boxscore URL by following $ref links:
+    /events/{id} -> competitions[0].$ref -> boxscore.$ref
+    Returns flat player rows or [] if not available.
     """
-    url = ESPN_CORE_BOXSCORE.format(event=event_id)
-    j = http_get_json(url)
+    try:
+        # 1) core event
+        ev = http_get_json(f"https://sports.core.api.espn.com/v2/sports/basketball/leagues/nba/events/{event_id}")
+        comps = ev.get("competitions") or []
+        if not comps:
+            return []
+        comp_ref = comps[0].get("$ref")
+        if not comp_ref:
+            return []
 
-    rows: List[Dict[str, Any]] = []
+        # 2) competition
+        comp = http_get_json(comp_ref)
+        box_ref = (comp.get("boxscore") or {}).get("$ref")
+        if not box_ref:
+            return []
 
-    # Core format: j["teams"] is a list; each team has "team" (ref) and "statistics" and "players" (list)
-    teams = j.get("teams") or []
-    for t in teams:
-        team_ref = t.get("team")  # a ref dict with "$ref"
-        team_obj = {}
-        if isinstance(team_ref, dict) and team_ref.get("$ref"):
-            team_obj = http_get_json(team_ref["$ref"])
-        team_id = safe_int(team_obj.get("id"))
-        team_abbr = team_obj.get("abbreviation") or team_obj.get("shortDisplayName")
+        # 3) boxscore
+        j = http_get_json(box_ref)
 
-        players = t.get("players") or []
-        for p in players:
-            # each player entry is usually a dict with "athlete" (ref) and "statistics" (list)
-            ath_ref = p.get("athlete")
-            ath = {}
-            if isinstance(ath_ref, dict) and ath_ref.get("$ref"):
-                ath = http_get_json(ath_ref["$ref"])
-            player_id = safe_int(ath.get("id"))
-            player_name = ath.get("displayName")
+        rows: List[Dict[str, Any]] = []
+        teams = j.get("teams") or []
+        for t in teams:
+            # team object is a ref - resolve it
+            team_ref = t.get("team")
+            team_obj = {}
+            if isinstance(team_ref, dict) and team_ref.get("$ref"):
+                team_obj = http_get_json(team_ref["$ref"])
+            team_id = safe_int(team_obj.get("id"))
+            team_abbr = team_obj.get("abbreviation") or team_obj.get("shortDisplayName")
 
-            # stats list -> normalize by "name"
-            stat_map: Dict[str, Any] = {}
-            for st in (p.get("statistics") or []):
-                name = st.get("name")
-                val = st.get("value")
-                if name:
-                    stat_map[name] = val
+            players = t.get("players") or []
+            for p in players:
+                # athlete is a ref - resolve
+                ath_ref = p.get("athlete")
+                ath = {}
+                if isinstance(ath_ref, dict) and ath_ref.get("$ref"):
+                    ath = http_get_json(ath_ref["$ref"])
+                player_id = safe_int(ath.get("id"))
+                player_name = ath.get("displayName")
 
-            def gi(*keys):
-                for k in keys:
-                    if k in stat_map and stat_map[k] is not None:
-                        return safe_int(stat_map[k])
-                return None
+                # statistics is a list of dicts with name/value
+                stat_map: Dict[str, Any] = {}
+                for st in (p.get("statistics") or []):
+                    name = st.get("name")
+                    val = st.get("value")
+                    if name:
+                        stat_map[name] = val
 
-            rows.append({
-                "team_id": team_id,
-                "team_abbr": team_abbr,
-                "player_id": player_id,
-                "player": player_name,
-                "starter": bool(p.get("starter")) if p.get("starter") is not None else None,
-                "minutes": stat_map.get("minutes"),
-                "pts": gi("points","pts"),
-                "reb": gi("rebounds","reb"),
-                "ast": gi("assists","ast"),
-                "stl": gi("steals","stl"),
-                "blk": gi("blocks","blk"),
-                "tov": gi("turnovers","to","tov"),
-                "fgm": gi("fieldGoalsMade","fgm"),
-                "fga": gi("fieldGoalsAttempted","fga"),
-                "fg3m": gi("threePointFieldGoalsMade","fg3m"),
-                "fg3a": gi("threePointFieldGoalsAttempted","fg3a"),
-                "ftm": gi("freeThrowsMade","ftm"),
-                "fta": gi("freeThrowsAttempted","fta"),
-                "oreb": gi("offensiveRebounds","oreb"),
-                "dreb": gi("defensiveRebounds","dreb"),
-                "pf": gi("fouls","pf"),
-            })
+                def gi(*keys):
+                    for k in keys:
+                        if k in stat_map and stat_map[k] is not None:
+                            return safe_int(stat_map[k])
+                    return None
 
-    return rows
-
-
+                rows.append({
+                    "team_id": team_id,
+                    "team_abbr": team_abbr,
+                    "player_id": player_id,
+                    "player": player_name,
+                    "starter": bool(p.get("starter")) if p.get("starter") is not None else None,
+                    "minutes": stat_map.get("minutes"),
+                    "pts": gi("points","pts"),
+                    "reb": gi("rebounds","reb"),
+                    "ast": gi("assists","ast"),
+                    "stl": gi("steals","stl"),
+                    "blk": gi("blocks","blk"),
+                    "tov": gi("turnovers","to","tov"),
+                    "fgm": gi("fieldGoalsMade","fgm"),
+                    "fga": gi("fieldGoalsAttempted","fga"),
+                    "fg3m": gi("threePointFieldGoalsMade","fg3m"),
+                    "fg3a": gi("threePointFieldGoalsAttempted","fg3a"),
+                    "ftm": gi("freeThrowsMade","ftm"),
+                    "fta": gi("freeThrowsAttempted","fta"),
+                    "oreb": gi("offensiveRebounds","oreb"),
+                    "dreb": gi("defensiveRebounds","dreb"),
+                    "pf": gi("fouls","pf"),
+                })
+        return rows
+    except requests.HTTPError as e:
+        # 404 or others - just return empty so caller can log and continue
+        print(f"core boxscore ref traversal failed for event {event_id}: {e}")
+        return []
+    except Exception as e:
+        print(f"core boxscore unexpected error for event {event_id}: {e}")
+        return []
 
 # -----------------------------
 # Type coercion to keep Arrow happy

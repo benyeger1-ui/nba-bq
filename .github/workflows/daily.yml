@@ -1,0 +1,31 @@
+name: NBA to BigQuery - daily
+
+on:
+  schedule:
+    - cron: "30 8 * * *"   # every day 08:30 UTC
+  workflow_dispatch: {}     # lets you run it manually
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run ingestion
+        env:
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          BQ_DATASET: ${{ secrets.BQ_DATASET }}
+          BALDONTLIE_API_KEY: ${{ secrets.BALDONTLIE_API_KEY }}
+        run: python ingest_yesterday_games.py

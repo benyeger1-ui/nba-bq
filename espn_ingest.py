@@ -33,11 +33,12 @@ SA_INFO = json.loads(os.environ["GCP_SA_KEY"])
 CREDS = service_account.Credentials.from_service_account_info(SA_INFO)
 BQ = bigquery.Client(project=PROJECT_ID, credentials=CREDS)
 
-# Fast ESPN endpoints (still working for basic data)
+# Working endpoints
 ESPN_SCOREBOARD = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard"
 ESPN_SUMMARY = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/summary"
 
-# Fast NBA CDN endpoints (no rate limits)
+# NBA.com scoreboard (for mapping game IDs)
+NBA_SCOREBOARD = "https://cdn.nba.com/static/json/liveData/scoreboard/todaysScoreboard_00.json"
 NBA_LIVE_BOXSCORE = "https://cdn.nba.com/static/json/liveData/boxscore/boxscore_{game_id}.json"
 
 # -----------------------------
@@ -146,7 +147,7 @@ def safe_float(x: Any) -> Optional[float]:
         return None
 
 def http_get_json(url: str, params: Optional[Dict[str, Any]] = None, timeout: int = 10) -> Dict[str, Any]:
-    """Fast HTTP request with minimal retries"""
+    """Fast HTTP request"""
     try:
         r = requests.get(url, params=params, headers=HEADERS, timeout=timeout)
         r.raise_for_status()
@@ -156,12 +157,172 @@ def http_get_json(url: str, params: Optional[Dict[str, Any]] = None, timeout: in
         return {}
 
 # -----------------------------
-# Fast data extraction
+# Enhanced ESPN Summary Parsing (working method)
+# -----------------------------
+def extract_players_from_espn_summary(espn_game_id: str, game_date: str, season: str) -> List[Dict[str, Any]]:
+    """
+    Extract player stats directly from ESPN summary endpoint
+    This method works reliably with ESPN game IDs
+    """
+    try:
+        summary_data = http_get_json(ESPN_SUMMARY, params={"event": espn_game_id})
+        
+        if not summary_data:
+            print(f"No summary data for ESPN game {espn_game_id}")
+            return []
+        
+        player_stats = []
+        
+        # Check for boxscore data in summary
+        boxscore = summary_data.get("boxscore", {})
+        teams = boxscore.get("teams", [])
+        
+        if not teams:
+            print(f"No teams found in summary for game {espn_game_id}")
+            return []
+        
+        print(f"Processing {len(teams)} teams from ESPN summary for game {espn_game_id}")
+        
+        for team_data in teams:
+            team_info = team_data.get("team", {})
+            team_id = safe_int(team_info.get("id"))
+            team_abbr = team_info.get("abbreviation", "")
+            
+            # Look for player statistics in different locations
+            players_found = []
+            
+            # Method 1: statistics with athletes
+            if "statistics" in team_data:
+                for stat_group in team_data["statistics"]:
+                    if "athletes" in stat_group:
+                        is_starter = stat_group.get("name", "").lower() == "starters"
+                        for athlete_data in stat_group["athletes"]:
+                            athlete = athlete_data.get("athlete", {})
+                            stats = athlete_data.get("stats", [])
+                            players_found.append((athlete, stats, is_starter))
+            
+            # Method 2: direct players array
+            elif "players" in team_data:
+                for player in team_data["players"]:
+                    athlete = player.get("athlete", {})
+                    stats = player.get("stats", [])
+                    is_starter = player.get("starter", False)
+                    players_found.append((athlete, stats, is_starter))
+            
+            print(f"Found {len(players_found)} players for team {team_abbr}")
+            
+            # Process each player
+            for athlete, stats, is_starter in players_found:
+                player_id = safe_int(athlete.get("id"))
+                player_name = athlete.get("displayName", "").strip()
+                
+                if not player_id or not player_name:
+                    continue
+                
+                # Parse stats array - ESPN format: [MIN, FG, 3P, FT, OREB, DREB, REB, AST, STL, BLK, TO, PF, +/-, PTS]
+                parsed_stats = parse_espn_stats_array(stats)
+                
+                player_stat = {
+                    'game_id': espn_game_id,
+                    'game_date': game_date,
+                    'season': season,
+                    'team_id': team_id,
+                    'team_abbr': team_abbr,
+                    'player_id': player_id,
+                    'player_name': player_name,
+                    'starter': is_starter,
+                    **parsed_stats
+                }
+                
+                player_stats.append(player_stat)
+        
+        print(f"Successfully extracted {len(player_stats)} player stats from ESPN summary for game {espn_game_id}")
+        return player_stats
+        
+    except Exception as e:
+        print(f"Error extracting from ESPN summary for game {espn_game_id}: {e}")
+        return []
+
+def parse_espn_stats_array(stats: List[str]) -> Dict[str, Any]:
+    """
+    Parse ESPN stats array format
+    Typical order: MIN, FG, 3P, FT, OREB, DREB, REB, AST, STL, BLK, TO, PF, +/-, PTS
+    """
+    parsed = {
+        'minutes': None, 'pts': None, 'fgm': None, 'fga': None, 'fg_pct': None,
+        'fg3m': None, 'fg3a': None, 'fg3_pct': None, 'ftm': None, 'fta': None, 'ft_pct': None,
+        'oreb': None, 'dreb': None, 'reb': None, 'ast': None, 'stl': None, 'blk': None,
+        'tov': None, 'pf': None, 'plus_minus': None
+    }
+    
+    if len(stats) < 14:
+        return parsed
+    
+    try:
+        # Minutes
+        parsed['minutes'] = stats[0] if stats[0] and stats[0] != "--" else None
+        
+        # Field Goals (format: "5-10")
+        fg_made, fg_attempted, fg_pct = parse_shooting_stat(stats[1])
+        parsed['fgm'] = fg_made
+        parsed['fga'] = fg_attempted
+        parsed['fg_pct'] = fg_pct
+        
+        # Three Pointers
+        three_made, three_attempted, three_pct = parse_shooting_stat(stats[2])
+        parsed['fg3m'] = three_made
+        parsed['fg3a'] = three_attempted
+        parsed['fg3_pct'] = three_pct
+        
+        # Free Throws
+        ft_made, ft_attempted, ft_pct = parse_shooting_stat(stats[3])
+        parsed['ftm'] = ft_made
+        parsed['fta'] = ft_attempted
+        parsed['ft_pct'] = ft_pct
+        
+        # Other stats
+        parsed['oreb'] = safe_int(stats[4]) if len(stats) > 4 and stats[4] != "--" else None
+        parsed['dreb'] = safe_int(stats[5]) if len(stats) > 5 and stats[5] != "--" else None
+        parsed['reb'] = safe_int(stats[6]) if len(stats) > 6 and stats[6] != "--" else None
+        parsed['ast'] = safe_int(stats[7]) if len(stats) > 7 and stats[7] != "--" else None
+        parsed['stl'] = safe_int(stats[8]) if len(stats) > 8 and stats[8] != "--" else None
+        parsed['blk'] = safe_int(stats[9]) if len(stats) > 9 and stats[9] != "--" else None
+        parsed['tov'] = safe_int(stats[10]) if len(stats) > 10 and stats[10] != "--" else None
+        parsed['pf'] = safe_int(stats[11]) if len(stats) > 11 and stats[11] != "--" else None
+        parsed['plus_minus'] = safe_int(stats[12]) if len(stats) > 12 and stats[12] != "--" and stats[12] else None
+        parsed['pts'] = safe_int(stats[13]) if len(stats) > 13 and stats[13] != "--" else None
+        
+    except Exception as e:
+        print(f"Error parsing stats array: {e}")
+    
+    return parsed
+
+def parse_shooting_stat(stat_str: str) -> tuple:
+    """Parse shooting stats like '5-10' into made, attempted, percentage"""
+    if not stat_str or stat_str == '--' or stat_str == 'N/A':
+        return None, None, None
+    
+    try:
+        if '-' in stat_str:
+            parts = stat_str.split('-')
+            if len(parts) == 2:
+                made = safe_int(parts[0])
+                attempted = safe_int(parts[1])
+                if made is not None and attempted is not None and attempted > 0:
+                    percentage = round((made / attempted), 3)
+                    return made, attempted, percentage
+                else:
+                    return made, attempted, None
+    except:
+        pass
+    
+    return None, None, None
+
+# -----------------------------
+# Main data processing
 # -----------------------------
 def get_games_for_date_fast(date_yyyymmdd: str) -> List[Dict[str, Any]]:
-    """
-    FAST: Get games using ESPN scoreboard (still works and fast)
-    """
+    """Get games using ESPN scoreboard"""
     try:
         data = http_get_json(ESPN_SCOREBOARD, params={"dates": date_yyyymmdd})
         games = []
@@ -180,7 +341,7 @@ def get_games_for_date_fast(date_yyyymmdd: str) -> List[Dict[str, Any]]:
                 game = {
                     'game_id': event['id'],
                     'game_date': event['date'][:10],  # YYYY-MM-DD
-                    'season': event.get('season', {}).get('year', '2025'),
+                    'season': str(event.get('season', {}).get('year', '2025')),
                     'home_team_id': safe_int(home_team.get('team', {}).get('id')),
                     'home_team_abbr': home_team.get('team', {}).get('abbreviation'),
                     'home_score': safe_int(home_team.get('score')),
@@ -198,131 +359,47 @@ def get_games_for_date_fast(date_yyyymmdd: str) -> List[Dict[str, Any]]:
         print(f"Error getting games for {date_yyyymmdd}: {e}")
         return []
 
-def extract_player_stats_fast(game_id: str, game_date: str, season: str) -> List[Dict[str, Any]]:
-    """
-    FAST: Extract player stats using NBA CDN (no rate limits, very fast)
-    """
-    url = NBA_LIVE_BOXSCORE.format(game_id=game_id)
-    
-    try:
-        data = http_get_json(url, timeout=5)  # Short timeout for speed
-        
-        if not data or 'game' not in data:
-            print(f"No NBA CDN data for game {game_id}")
-            return []
-        
-        game_data = data['game']
-        home_team = game_data.get('homeTeam', {})
-        away_team = game_data.get('awayTeam', {})
-        
-        player_stats = []
-        
-        for team in [home_team, away_team]:
-            team_id = safe_int(team.get('teamId'))
-            team_abbr = team.get('teamTricode')
-            
-            players = team.get('players', [])
-            for player in players:
-                # Skip players who didn't play
-                if not player.get('played'):
-                    continue
-                
-                stats = player.get('statistics', {})
-                
-                # Skip if no minutes
-                minutes = stats.get('minutes')
-                if not minutes or minutes == 'PT0M':
-                    continue
-                
-                player_stat = {
-                    'game_id': game_id,
-                    'game_date': game_date,
-                    'season': season,
-                    'team_id': team_id,
-                    'team_abbr': team_abbr,
-                    'player_id': safe_int(player.get('personId')),
-                    'player_name': player.get('name', '').strip(),
-                    'starter': bool(player.get('starter')),
-                    'minutes': minutes,
-                    'pts': safe_int(stats.get('points')),
-                    'fgm': safe_int(stats.get('fieldGoalsMade')),
-                    'fga': safe_int(stats.get('fieldGoalsAttempted')),
-                    'fg_pct': safe_float(stats.get('fieldGoalsPercentage')),
-                    'fg3m': safe_int(stats.get('threePointersMade')),
-                    'fg3a': safe_int(stats.get('threePointersAttempted')),
-                    'fg3_pct': safe_float(stats.get('threePointersPercentage')),
-                    'ftm': safe_int(stats.get('freeThrowsMade')),
-                    'fta': safe_int(stats.get('freeThrowsAttempted')),
-                    'ft_pct': safe_float(stats.get('freeThrowsPercentage')),
-                    'oreb': safe_int(stats.get('reboundsOffensive')),
-                    'dreb': safe_int(stats.get('reboundsDefensive')),
-                    'reb': safe_int(stats.get('reboundsTotal')),
-                    'ast': safe_int(stats.get('assists')),
-                    'stl': safe_int(stats.get('steals')),
-                    'blk': safe_int(stats.get('blocks')),
-                    'tov': safe_int(stats.get('turnovers')),
-                    'pf': safe_int(stats.get('foulsPersonal')),
-                    'plus_minus': safe_int(stats.get('plusMinusPoints')),
-                }
-                
-                player_stats.append(player_stat)
-        
-        print(f"Extracted {len(player_stats)} player stats for game {game_id}")
-        return player_stats
-        
-    except Exception as e:
-        print(f"Error extracting player stats for game {game_id}: {e}")
-        return []
-
 def process_game_parallel(game: Dict[str, Any]) -> tuple:
-    """
-    Process a single game (for parallel execution)
-    Returns: (game_dict, player_stats_list)
-    """
+    """Process a single game using ESPN data"""
     game_id = game['game_id']
     
-    # Extract player stats
-    player_stats = extract_player_stats_fast(
+    # Extract player stats using ESPN summary (this works!)
+    player_stats = extract_players_from_espn_summary(
         game_id, 
         game['game_date'], 
-        str(game['season'])
+        game['season']
     )
     
     return game, player_stats
 
 def process_date_fast(date_yyyymmdd: str) -> tuple:
-    """
-    OPTIMIZED: Process a date with parallel game processing
-    """
-    print(f"\n=== FAST Processing {date_yyyymmdd} ===")
+    """Process a date with parallel game processing"""
+    print(f"\n=== Processing {date_yyyymmdd} ===")
     
-    # Get games quickly
+    # Get games
     games = get_games_for_date_fast(date_yyyymmdd)
     
     if not games:
         print(f"No completed games found for {date_yyyymmdd}")
         return pd.DataFrame(), pd.DataFrame()
     
-    print(f"Processing {len(games)} games in parallel...")
+    print(f"Processing {len(games)} games...")
     
-    # Process games in parallel for speed
     all_games_data = []
     all_player_stats = []
     
-    # Use ThreadPoolExecutor for parallel processing
-    with ThreadPoolExecutor(max_workers=5) as executor:  # Limit to 5 concurrent requests
-        # Submit all games for processing
-        future_to_game = {executor.submit(process_game_parallel, game): game for game in games}
-        
-        # Collect results as they complete
-        for future in as_completed(future_to_game):
-            try:
-                game_data, player_stats = future.result()
-                all_games_data.append(game_data)
-                all_player_stats.extend(player_stats)
-            except Exception as e:
-                game = future_to_game[future]
-                print(f"Error processing game {game['game_id']}: {e}")
+    # Process games (can use parallel processing or sequential for reliability)
+    for game in games:
+        try:
+            game_data, player_stats = process_game_parallel(game)
+            all_games_data.append(game_data)
+            all_player_stats.extend(player_stats)
+            
+            # Small delay to be respectful to ESPN
+            time.sleep(0.2)
+            
+        except Exception as e:
+            print(f"Error processing game {game['game_id']}: {e}")
     
     # Create DataFrames
     games_df = pd.DataFrame(all_games_data) if all_games_data else pd.DataFrame()
@@ -391,9 +468,7 @@ def coerce_box_dtypes(df: pd.DataFrame) -> pd.DataFrame:
 # Main orchestration
 # -----------------------------
 def ingest_dates_fast(ymd_list: List[str]) -> None:
-    """
-    OPTIMIZED: Process multiple dates efficiently
-    """
+    """Process multiple dates efficiently"""
     ensure_tables()
     
     all_games_frames = []
@@ -416,8 +491,7 @@ def ingest_dates_fast(ymd_list: List[str]) -> None:
                 all_box_frames.append(players_df)
                 total_players += len(players_df)
             
-            # Minimal delay between dates
-            time.sleep(0.1)
+            time.sleep(0.5)  # Respectful delay between dates
             
         except Exception as e:
             print(f"ERROR processing date {ymd}: {e}")
@@ -454,7 +528,7 @@ def yyyymmdd_list(start: datetime.date, end: datetime.date) -> List[str]:
     return out
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="FAST NBA data ingestion using optimized APIs")
+    parser = argparse.ArgumentParser(description="NBA data ingestion using working ESPN endpoints")
     parser.add_argument("--mode", choices=["backfill", "daily"], required=True)
     parser.add_argument("--start", help="YYYY-MM-DD inclusive start for backfill")
     parser.add_argument("--end", help="YYYY-MM-DD inclusive end for backfill")
@@ -463,7 +537,7 @@ def main() -> None:
     if args.mode == "daily":
         yday = datetime.date.today() - datetime.timedelta(days=1)
         ymd = yday.strftime("%Y%m%d")
-        print(f"Running FAST daily ingest for {ymd}")
+        print(f"Running daily ingest for {ymd}")
         ingest_dates_fast([ymd])
         print(f"Daily ingest complete for {ymd}")
         return
@@ -483,7 +557,7 @@ def main() -> None:
             sys.exit(1)
         
         dates = yyyymmdd_list(s, e)
-        print(f"Running FAST backfill from {args.start} to {args.end} ({len(dates)} dates)")
+        print(f"Running backfill from {args.start} to {args.end} ({len(dates)} dates)")
         ingest_dates_fast(dates)
         print(f"Backfill complete for {args.start} to {args.end}")
         return

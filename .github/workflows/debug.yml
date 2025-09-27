@@ -1,2 +1,3 @@
 # Save the script above as debug_nba.py, then run:
-python debug_nba.py
+run: |
+        python debug_nba.py

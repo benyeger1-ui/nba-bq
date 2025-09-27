@@ -25,45 +25,30 @@ SA_INFO    = json.loads(os.environ["GCP_SA_KEY"])
 CREDS      = service_account.Credentials.from_service_account_info(SA_INFO)
 BQ         = bigquery.Client(project=PROJECT_ID, credentials=CREDS)
 
-# -----------------------------------
-# nba_api - Stats endpoints for daily
-# ScoreboardV2 + BoxScoreTraditionalV2
-# Docs and community refs confirm params:
-# - ScoreboardV2(game_date=MM/DD/YYYY)
-# - BoxScoreTraditionalV2(game_id=...)
-# -----------------------------------
-from nba_api.stats.endpoints import scoreboardv2, boxscoretraditionalv2  # noqa: E402
-# refs: ScoreboardV2 args and BoxScoreTraditionalV2 PlayerStats frame
-# hoopR docs for these endpoints and frames: scoreboardv2, boxscoretraditionalv2
-# and nba_api docs site.  (citations in chat, not in code)
+# Yahoo Sports API endpoints
+YAHOO_BASE_URL = "https://api.sportradar.us/nba/trial/v8/en"  # Free tier
+# Alternative Yahoo Fantasy Sports API (if you have access)
+YAHOO_FANTASY_BASE = "https://fantasysports.yahooapis.com/fantasy/v2/game/nba"
 
-# -----------------------------------
-# ESPN endpoints for backfill
-# -----------------------------------
-ESPN_SCOREBOARD     = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard"
-ESPN_SUMMARY        = "https://site.web.api.espn.com/apis/site/v2/sports/basketball/nba/summary"
-ESPN_SITE_BOXSCORE  = "https://site.web.api.espn.com/apis/site/v2/sports/basketball/nba/boxscore"
-ESPN_CORE_EVENT_RT  = "https://sports.core.api.espn.com/v2/sports/basketball/leagues/nba/events/{event_id}"
+# Yahoo Sports unofficial API endpoints (publicly accessible)
+YAHOO_SPORTS_SCOREBOARD = "https://api-secure.sports.yahoo.com/v1/editorial/s/scoreboard"
+YAHOO_SPORTS_GAME = "https://api-secure.sports.yahoo.com/v1/editorial/game"
 
-# some ESPN edges return trimmed payloads unless you look like a browser and set region/lang
+# Headers to mimic browser requests
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
     "Accept": "application/json, text/plain, */*",
-    "Referer": "https://www.espn.com/",
-    "Origin": "https://www.espn.com",
+    "Referer": "https://sports.yahoo.com/",
+    "Origin": "https://sports.yahoo.com",
     "Cache-Control": "no-cache",
     "Pragma": "no-cache",
 }
-DEFAULT_PARAMS = {"region": "us", "lang": "en", "xhr": "1"}
 
 def http_get_json(url: str, params: Optional[Dict[str, Any]] = None, max_retries: int = 3) -> Dict[str, Any]:
     last_err = None
-    merged = dict(DEFAULT_PARAMS)
-    if params:
-        merged.update(params)
     for _ in range(max_retries):
         try:
-            r = requests.get(url, params=merged, headers=HEADERS, timeout=30)
+            r = requests.get(url, params=params, headers=HEADERS, timeout=30)
             r.raise_for_status()
             return r.json()
         except Exception as e:
@@ -72,7 +57,7 @@ def http_get_json(url: str, params: Optional[Dict[str, Any]] = None, max_retries
     raise last_err if last_err else RuntimeError("request failed")
 
 # -----------------------------------
-# BigQuery schemas and helpers
+# BigQuery schemas (same as before)
 # -----------------------------------
 GAMES_SCHEMA = [
     bigquery.SchemaField("event_id", "STRING"),
@@ -89,7 +74,7 @@ GAMES_SCHEMA = [
 ]
 
 BOX_SCHEMA = [
-    bigquery.SchemaField("event_id", "STRING"),   # we store NBA game_id for nba_api rows
+    bigquery.SchemaField("event_id", "STRING"),
     bigquery.SchemaField("date", "DATE"),
     bigquery.SchemaField("season", "INT64"),
     bigquery.SchemaField("team_id", "INT64"),
@@ -150,7 +135,7 @@ def load_df(df: pd.DataFrame, table: str) -> None:
     BQ.load_table_from_dataframe(df, table_id, job_config=job_config).result()
 
 # -----------------------------------
-# Type coercion to keep Arrow happy
+# Type coercion (same as before)
 # -----------------------------------
 def coerce_games_dtypes(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
@@ -188,7 +173,7 @@ def coerce_box_dtypes(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 # -----------------------------------
-# Utilities and ESPN fetchers for backfill
+# Utilities
 # -----------------------------------
 def safe_int(x: Any) -> Optional[int]:
     try:
@@ -196,397 +181,344 @@ def safe_int(x: Any) -> Optional[int]:
     except Exception:
         return None
 
-def get_scoreboard_for_date_yyyymmdd(yyyymmdd: str) -> Dict[str, Any]:
-    return http_get_json(ESPN_SCOREBOARD, params={"dates": yyyymmdd})
-
-def list_event_ids(scoreboard_json: Dict[str, Any]) -> List[str]:
-    events = scoreboard_json.get("events", []) or []
-    return [e.get("id") for e in events if e.get("id")]
-
-def get_summary(event_id: str) -> Dict[str, Any]:
-    return http_get_json(ESPN_SUMMARY, params={"event": event_id})
-
-def fetch_core_boxscore_players(event_id: str) -> List[Dict[str, Any]]:
+def safe_str(x: Any) -> Optional[str]:
     try:
-        ev = http_get_json(ESPN_CORE_EVENT_RT.format(event_id=event_id))
-        comps = ev.get("competitions") or []
-        if not comps or not isinstance(comps[0], dict) or not comps[0].get("$ref"):
-            return []
-        comp = http_get_json(comps[0]["$ref"])
-        box_ref = (comp.get("boxscore") or {}).get("$ref")
-        if not box_ref:
-            return []
-        j = http_get_json(box_ref)
-        rows: List[Dict[str, Any]] = []
-        teams = j.get("teams") or []
-        for t in teams:
-            team_ref = t.get("team")
-            team_obj = {}
-            if isinstance(team_ref, dict) and team_ref.get("$ref"):
-                team_obj = http_get_json(team_ref["$ref"])
-            team_id = safe_int(team_obj.get("id"))
-            team_abbr = team_obj.get("abbreviation") or team_obj.get("shortDisplayName")
-            for p in (t.get("players") or []):
-                ath_ref = p.get("athlete")
-                ath = {}
-                if isinstance(ath_ref, dict) and ath_ref.get("$ref"):
-                    ath = http_get_json(ath_ref["$ref"])
-                player_id = safe_int(ath.get("id"))
-                player_name = ath.get("displayName")
-                stat_map: Dict[str, Any] = {}
-                for st in (p.get("statistics") or []):
-                    nm, val = st.get("name"), st.get("value")
-                    if nm:
-                        stat_map[nm] = val
-                def gi(*keys):
-                    for k in keys:
-                        if k in stat_map and stat_map[k] is not None:
-                            return safe_int(stat_map[k])
-                    return None
-                rows.append({
-                    "team_id": team_id, "team_abbr": team_abbr,
-                    "player_id": player_id, "player": player_name,
-                    "starter": bool(p.get("starter")) if p.get("starter") is not None else None,
-                    "minutes": stat_map.get("minutes"),
-                    "pts": gi("points","pts"), "reb": gi("rebounds","reb"), "ast": gi("assists","ast"),
-                    "stl": gi("steals","stl"), "blk": gi("blocks","blk"), "tov": gi("turnovers","to","tov"),
-                    "fgm": gi("fieldGoalsMade","fgm"), "fga": gi("fieldGoalsAttempted","fga"),
-                    "fg3m": gi("threePointFieldGoalsMade","fg3m"), "fg3a": gi("threePointFieldGoalsAttempted","fg3a"),
-                    "ftm": gi("freeThrowsMade","ftm"), "fta": gi("freeThrowsAttempted","fta"),
-                    "oreb": gi("offensiveRebounds","oreb"), "dreb": gi("defensiveRebounds","dreb"), "pf": gi("fouls","pf"),
-                })
-        return rows
-    except requests.HTTPError as e:
-        print(f"core boxscore traversal failed for event {event_id}: {e}")
-        return []
-    except Exception as e:
-        print(f"core boxscore unexpected error for event {event_id}: {e}")
-        return []
-
-def fetch_site_boxscore_players(event_id: str) -> List[Dict[str, Any]]:
-    try:
-        j = http_get_json(ESPN_SITE_BOXSCORE, params={"event": event_id})
-        rows: List[Dict[str, Any]] = []
-        box = j.get("boxscore") or j
-        teams = (box.get("teams") or [])
-        for t in teams:
-            team = t.get("team") or {}
-            tid = safe_int(team.get("id"))
-            tabbr = team.get("abbreviation") or team.get("shortDisplayName")
-            players = t.get("players") or []
-            for p in players:
-                ath = p.get("athlete") or {}
-                pid = safe_int(ath.get("id"))
-                name = ath.get("displayName")
-                starter = bool(p.get("starter")) if p.get("starter") is not None else None
-                stat_map: Dict[str, Any] = {}
-                if isinstance(p.get("stats"), dict):
-                    stat_map.update(p["stats"])
-                for st in (p.get("statistics") or []):
-                    nm, val = st.get("name"), st.get("value")
-                    if nm:
-                        stat_map[nm] = val
-                def gi(*keys):
-                    for k in keys:
-                        if k in stat_map and stat_map[k] is not None:
-                            return safe_int(stat_map[k])
-                    return None
-                rows.append({
-                    "team_id": tid, "team_abbr": tabbr,
-                    "player_id": pid, "player": name,
-                    "starter": starter, "minutes": stat_map.get("minutes"),
-                    "pts": gi("points","pts"), "reb": gi("rebounds","reb"), "ast": gi("assists","ast"),
-                    "stl": gi("steals","stl"), "blk": gi("blocks","blk"), "tov": gi("turnovers","to","tov"),
-                    "fgm": gi("fieldGoalsMade","fgm"), "fga": gi("fieldGoalsAttempted","fga"),
-                    "fg3m": gi("threePointFieldGoalsMade","fg3m"), "fg3a": gi("threePointFieldGoalsAttempted","fg3a"),
-                    "ftm": gi("freeThrowsMade","ftm"), "fta": gi("freeThrowsAttempted","fta"),
-                    "oreb": gi("offensiveRebounds","oreb"), "dreb": gi("defensiveRebounds","dreb"), "pf": gi("fouls","pf"),
-                })
-        return rows
-    except Exception as e:
-        print(f"site boxscore fallback failed for event {event_id}: {e}")
-        return []
+        return str(x) if x is not None and x != "" else None
+    except Exception:
+        return None
 
 # -----------------------------------
-# Normalizers
+# Yahoo Sports API functions
 # -----------------------------------
-def normalize_game_row(event_id: str, summary: Dict[str, Any], fallback_date_iso: str) -> pd.DataFrame:
-    header = summary.get("header", {}) or {}
-    competitions = header.get("competitions", []) or []
-    comp = competitions[0] if competitions else {}
-    season = ((header.get("season") or {}).get("year"))
-    status_type = (((comp.get("status") or {}).get("type") or {}).get("name"))
-    competitors = comp.get("competitors", []) or []
-    home = next((c for c in competitors if c.get("homeAway") == "home"), {})
-    away = next((c for c in competitors if c.get("homeAway") == "away"), {})
-    def team_fields(c: Dict[str, Any]):
-        team = c.get("team") or {}
-        abbr = team.get("abbreviation") or team.get("shortDisplayName")
-        tid = safe_int(team.get("id"))
-        score = safe_int(c.get("score"))
-        return tid, abbr, score
-    hid, habbr, hscore = team_fields(home)
-    aid, aabbr, ascore = team_fields(away)
-    iso_date = (comp.get("date", "") or "")[:10] or fallback_date_iso
-    uid = header.get("uid")
-    df = pd.DataFrame([{
-        "event_id": event_id, "game_uid": uid, "date": iso_date,
-        "season": season, "status_type": status_type,
-        "home_id": hid, "home_abbr": habbr, "home_score": hscore,
-        "away_id": aid, "away_abbr": aabbr, "away_score": ascore,
-    }])
+def get_yahoo_scoreboard(date_str: str) -> Dict[str, Any]:
+    """
+    Fetch scoreboard for a specific date from Yahoo Sports
+    date_str should be in YYYY-MM-DD format
+    """
+    try:
+        # Convert date to the format Yahoo expects
+        date_obj = datetime.datetime.strptime(date_str, "%Y-%m-%d")
+        yahoo_date = date_obj.strftime("%Y-%m-%d")
+        
+        params = {
+            "leagues": "nba",
+            "date": yahoo_date,
+            "region": "US",
+            "lang": "en-US"
+        }
+        
+        return http_get_json(YAHOO_SPORTS_SCOREBOARD, params=params)
+    except Exception as e:
+        print(f"Error fetching Yahoo scoreboard for {date_str}: {e}")
+        return {}
+
+def get_yahoo_game_details(game_id: str) -> Dict[str, Any]:
+    """
+    Fetch detailed game information including box scores from Yahoo Sports
+    """
+    try:
+        params = {
+            "game_id": game_id,
+            "region": "US",
+            "lang": "en-US"
+        }
+        
+        return http_get_json(YAHOO_SPORTS_GAME, params=params)
+    except Exception as e:
+        print(f"Error fetching Yahoo game details for {game_id}: {e}")
+        return {}
+
+def extract_games_from_yahoo_scoreboard(scoreboard_data: Dict[str, Any], date_str: str) -> pd.DataFrame:
+    """
+    Extract game information from Yahoo scoreboard response
+    """
+    games_list = []
+    
+    try:
+        # Yahoo's structure may vary, adjust based on actual response
+        games = scoreboard_data.get("games", [])
+        if not games and "service" in scoreboard_data:
+            # Alternative structure
+            service_data = scoreboard_data.get("service", {})
+            games = service_data.get("games", [])
+        
+        for game in games:
+            if not isinstance(game, dict):
+                continue
+                
+            game_id = safe_str(game.get("game_id") or game.get("id"))
+            if not game_id:
+                continue
+            
+            # Extract teams information
+            teams = game.get("teams", [])
+            if len(teams) < 2:
+                continue
+            
+            home_team = None
+            away_team = None
+            
+            for team in teams:
+                if team.get("is_home", False):
+                    home_team = team
+                else:
+                    away_team = team
+            
+            if not home_team or not away_team:
+                # Fallback: assume first is away, second is home
+                away_team = teams[0]
+                home_team = teams[1]
+            
+            # Extract game information
+            status = game.get("status", {})
+            status_type = safe_str(status.get("type") or status.get("state"))
+            
+            # Season year (approximate from date)
+            year = int(date_str[:4])
+            month = int(date_str[5:7])
+            season = year if month >= 10 else year - 1
+            
+            game_row = {
+                "event_id": game_id,
+                "game_uid": safe_str(game.get("uid")),
+                "date": date_str,
+                "season": season,
+                "status_type": status_type,
+                "home_id": safe_int(home_team.get("team_id") or home_team.get("id")),
+                "home_abbr": safe_str(home_team.get("abbreviation") or home_team.get("abbr")),
+                "home_score": safe_int(home_team.get("score")),
+                "away_id": safe_int(away_team.get("team_id") or away_team.get("id")),
+                "away_abbr": safe_str(away_team.get("abbreviation") or away_team.get("abbr")),
+                "away_score": safe_int(away_team.get("score"))
+            }
+            
+            games_list.append(game_row)
+            
+    except Exception as e:
+        print(f"Error parsing Yahoo scoreboard data: {e}")
+    
+    if not games_list:
+        return pd.DataFrame(columns=[f.name for f in GAMES_SCHEMA])
+    
+    df = pd.DataFrame(games_list)
     return coerce_games_dtypes(df)
 
-def normalize_player_box(event_id: str, summary: Dict[str, Any], fallback_date_iso: str) -> pd.DataFrame:
-    header = summary.get("header", {}) or {}
-    competitions = header.get("competitions", []) or []
-    comp = competitions[0] if competitions else {}
-    iso_date = (comp.get("date", "") or "")[:10] or fallback_date_iso
-    season = ((header.get("season") or {}).get("year"))
-    rows: List[Dict[str, Any]] = []
-
-    # source 1 - site summary
-    box = (summary.get("boxscore") or {})
-    teams = box.get("teams", []) or []
-    for t in teams:
-        team = t.get("team") or {}
-        tid = safe_int(team.get("id"))
-        tabbr = team.get("abbreviation") or team.get("shortDisplayName")
-        players = t.get("players") or []
-        for p in players:
-            ath = p.get("athlete") or {}
-            pid = safe_int(ath.get("id"))
-            name = ath.get("displayName")
-            starter_val = p.get("starter")
-            starter = bool(starter_val) if starter_val is not None else None
-            stats2 = p.get("stats") or {}
-            def gi(*keys):
-                for k in keys:
-                    if k in stats2 and stats2[k] is not None:
-                        return safe_int(stats2[k])
-                return None
-            rows.append({
-                "event_id": event_id, "date": iso_date, "season": season,
-                "team_id": tid, "team_abbr": tabbr, "player_id": pid, "player": name,
-                "starter": starter, "minutes": p.get("minutes"),
-                "pts": gi("points","pts"), "reb": gi("rebounds","reb"), "ast": gi("assists","ast"),
-                "stl": gi("steals","stl"), "blk": gi("blocks","blk"), "tov": gi("turnovers","to","tov"),
-                "fgm": gi("fieldGoalsMade","fgm"), "fga": gi("fieldGoalsAttempted","fga"),
-                "fg3m": gi("threePointFieldGoalsMade","fg3m"), "fg3a": gi("threePointFieldGoalsAttempted","fg3a"),
-                "ftm": gi("freeThrowsMade","ftm"), "fta": gi("freeThrowsAttempted","fta"),
-                "oreb": gi("offensiveRebounds","oreb"), "dreb": gi("defensiveRebounds","dreb"), "pf": gi("fouls","pf"),
-            })
-
-    if rows:
-        print(f"event {event_id}: site summary players -> {len(rows)}")
-    else:
-        # source 2 - core traversal
-        core_rows = fetch_core_boxscore_players(event_id)
-        if core_rows:
-            for r in core_rows:
-                r.update({"event_id": event_id, "date": iso_date, "season": season})
-            rows = core_rows
-            print(f"event {event_id}: core boxscore players -> {len(rows)}")
-        else:
-            # source 3 - site boxscore endpoint
-            site_rows = fetch_site_boxscore_players(event_id)
-            if site_rows:
-                for r in site_rows:
-                    r.update({"event_id": event_id, "date": iso_date, "season": season})
-                rows = site_rows
-                print(f"event {event_id}: site boxscore fallback -> {len(rows)}")
-            else:
-                print(f"event {event_id}: no players found in any source")
-
-    df = pd.DataFrame(rows, columns=[f.name for f in BOX_SCHEMA]) if rows else pd.DataFrame(columns=[f.name for f in BOX_SCHEMA])
-    return coerce_box_dtypes(df)
-
-# -----------------------------------
-# nba_api daily - player boxes by date
-# -----------------------------------
-def fetch_player_boxes_via_nba_api(date_iso: str) -> pd.DataFrame:
+def extract_player_stats_from_yahoo_game(game_data: Dict[str, Any], game_id: str, date_str: str) -> pd.DataFrame:
     """
-    Use NBA Stats via nba_api for per-player box scores for a single date.
-    - ScoreboardV2(game_date=MM/DD/YYYY) -> GAME_IDs
-    - BoxScoreTraditionalV2(game_id=...) -> PlayerStats
+    Extract player box score statistics from Yahoo game details
     """
-    mmddyyyy = f"{date_iso[5:7]}/{date_iso[8:10]}/{date_iso[:4]}"
-    sb = scoreboardv2.ScoreboardV2(game_date=mmddyyyy, day_offset=0, league_id="00")
-    frames = sb.get_data_frames()
-
-    game_header_df = None
-    for df in frames:
-        if "GAME_ID" in df.columns:
-            game_header_df = df
-            break
-    if game_header_df is None or game_header_df.empty:
-        return pd.DataFrame(columns=[f.name for f in BOX_SCHEMA])
-
-    game_ids = game_header_df["GAME_ID"].astype(str).unique().tolist()
-
-    rows = []
-    for gid in game_ids:
-        bs = boxscoretraditionalv2.BoxScoreTraditionalV2(game_id=gid)
-        bs_frames = bs.get_data_frames()
-        player_stats_df = None
-        for df in bs_frames:
-            if set(["PLAYER_ID", "PLAYER_NAME", "TEAM_ID", "TEAM_ABBREVIATION"]).issubset(df.columns):
-                player_stats_df = df
-                break
-        if player_stats_df is None or player_stats_df.empty:
-            continue
-
-        for _, r in player_stats_df.iterrows():
-            rows.append({
-                "event_id": gid,          # store NBA game id here
-                "date": date_iso,
-                "season": None,           # fill below from date
-                "team_id": int(r["TEAM_ID"]) if pd.notna(r["TEAM_ID"]) else None,
-                "team_abbr": r.get("TEAM_ABBREVIATION"),
-                "player_id": int(r["PLAYER_ID"]) if pd.notna(r["PLAYER_ID"]) else None,
-                "player": r.get("PLAYER_NAME"),
-                "starter": bool(r["START_POSITION"] not in [None, "", ""]) if "START_POSITION" in r else None,
-                "minutes": r.get("MIN"),
-                "pts": int(r["PTS"]) if pd.notna(r.get("PTS")) else None,
-                "reb": int(r["REB"]) if pd.notna(r.get("REB")) else None,
-                "ast": int(r["AST"]) if pd.notna(r.get("AST")) else None,
-                "stl": int(r["STL"]) if pd.notna(r.get("STL")) else None,
-                "blk": int(r["BLK"]) if pd.notna(r.get("BLK")) else None,
-                "tov": int(r["TOV"]) if pd.notna(r.get("TOV")) else None,
-                "fgm": int(r["FGM"]) if pd.notna(r.get("FGM")) else None,
-                "fga": int(r["FGA"]) if pd.notna(r.get("FGA")) else None,
-                "fg3m": int(r["FG3M"]) if pd.notna(r.get("FG3M")) else None,
-                "fg3a": int(r["FG3A"]) if pd.notna(r.get("FG3A")) else None,
-                "ftm": int(r["FTM"]) if pd.notna(r.get("FTM")) else None,
-                "fta": int(r["FTA"]) if pd.notna(r.get("FTA")) else None,
-                "oreb": int(r["OREB"]) if pd.notna(r.get("OREB"]) else None,
-                "dreb": int(r["DREB"]) if pd.notna(r.get("DREB"]) else None,
-                "pf": int(r["PF"]) if pd.notna(r.get("PF"]) else None,
-            })
-
-    if not rows:
-        return pd.DataFrame(columns=[f.name for f in BOX_SCHEMA])
-
-    df = pd.DataFrame(rows, columns=[f.name for f in BOX_SCHEMA])
-
-    # infer season year from calendar date - Oct or later counts as that season year
+    players_list = []
+    
     try:
-        y = int(date_iso[:4]); m = int(date_iso[5:7])
-        season_year = y if m >= 10 else (y - 1)
-        df["season"] = season_year
-    except Exception:
-        pass
-
+        # Season year
+        year = int(date_str[:4])
+        month = int(date_str[5:7])
+        season = year if month >= 10 else year - 1
+        
+        # Look for player stats in various possible locations
+        teams_data = game_data.get("teams", [])
+        if not teams_data and "boxscore" in game_data:
+            teams_data = game_data["boxscore"].get("teams", [])
+        
+        for team in teams_data:
+            if not isinstance(team, dict):
+                continue
+                
+            team_id = safe_int(team.get("team_id") or team.get("id"))
+            team_abbr = safe_str(team.get("abbreviation") or team.get("abbr"))
+            
+            # Look for players in various possible locations
+            players = team.get("players", [])
+            if not players and "roster" in team:
+                players = team["roster"].get("players", [])
+            
+            for player in players:
+                if not isinstance(player, dict):
+                    continue
+                
+                # Player identification
+                player_id = safe_int(player.get("player_id") or player.get("id"))
+                player_name = safe_str(player.get("name") or player.get("display_name"))
+                
+                # Player stats - Yahoo may have different field names
+                stats = player.get("stats", {})
+                if not stats and "statistics" in player:
+                    stats = player["statistics"]
+                
+                # Extract statistical categories
+                def get_stat(*keys):
+                    for key in keys:
+                        val = stats.get(key)
+                        if val is not None:
+                            return safe_int(val)
+                    return None
+                
+                # Check if player started
+                starter = player.get("starter", False)
+                if isinstance(starter, str):
+                    starter = starter.lower() in ["true", "1", "yes"]
+                elif starter is None:
+                    # Check position or other indicators
+                    position = player.get("position", "")
+                    starter = bool(position and position != "BENCH")
+                
+                player_row = {
+                    "event_id": game_id,
+                    "date": date_str,
+                    "season": season,
+                    "team_id": team_id,
+                    "team_abbr": team_abbr,
+                    "player_id": player_id,
+                    "player": player_name,
+                    "starter": starter,
+                    "minutes": safe_str(stats.get("minutes") or stats.get("min")),
+                    "pts": get_stat("points", "pts"),
+                    "reb": get_stat("rebounds", "reb", "total_rebounds"),
+                    "ast": get_stat("assists", "ast"),
+                    "stl": get_stat("steals", "stl"),
+                    "blk": get_stat("blocks", "blk"),
+                    "tov": get_stat("turnovers", "tov", "to"),
+                    "fgm": get_stat("field_goals_made", "fgm", "fg_made"),
+                    "fga": get_stat("field_goals_attempted", "fga", "fg_attempted"),
+                    "fg3m": get_stat("three_point_field_goals_made", "fg3m", "3pm"),
+                    "fg3a": get_stat("three_point_field_goals_attempted", "fg3a", "3pa"),
+                    "ftm": get_stat("free_throws_made", "ftm", "ft_made"),
+                    "fta": get_stat("free_throws_attempted", "fta", "ft_attempted"),
+                    "oreb": get_stat("offensive_rebounds", "oreb"),
+                    "dreb": get_stat("defensive_rebounds", "dreb"),
+                    "pf": get_stat("personal_fouls", "pf", "fouls")
+                }
+                
+                players_list.append(player_row)
+                
+    except Exception as e:
+        print(f"Error parsing Yahoo player stats for game {game_id}: {e}")
+    
+    if not players_list:
+        return pd.DataFrame(columns=[f.name for f in BOX_SCHEMA])
+    
+    df = pd.DataFrame(players_list)
     return coerce_box_dtypes(df)
 
 # -----------------------------------
-# Orchestration
+# Main ingestion functions
 # -----------------------------------
-def yyyymmdd_list(start: datetime.date, end: datetime.date) -> List[str]:
-    out = []
-    cur = start
-    while cur <= end:
-        out.append(cur.strftime("%Y%m%d"))
-        cur += datetime.timedelta(days=1)
-    return out
-
-def ingest_dates_via_espn(ymd_list: List[str]) -> None:
+def ingest_date_via_yahoo(date_str: str) -> None:
+    """
+    Ingest games and player stats for a specific date using Yahoo Sports API
+    """
     ensure_tables()
-    games_frames: List[pd.DataFrame] = []
-    box_frames: List[pd.DataFrame] = []
-
-    total_events = 0
-    total_games_rows = 0
-    total_box_rows = 0
-
-    for ymd in ymd_list:
-        fallback_iso = f"{ymd[:4]}-{ymd[4:6]}-{ymd[6:]}"
-        sb = get_scoreboard_for_date_yyyymmdd(ymd)
-        event_ids = list_event_ids(sb)
-        print(f"[{fallback_iso}] events: {len(event_ids)}")
-        total_events += len(event_ids)
-
-        for eid in event_ids:
-            summary = get_summary(eid)
-            has_box = bool((summary.get("boxscore") or {}).get("teams"))
-            print(f"event {eid}: summary box teams present? {has_box}")
-
-            gdf = normalize_game_row(eid, summary, fallback_iso)
-            pdf = normalize_player_box(eid, summary, fallback_iso)
-
-            if not gdf.empty:
-                total_games_rows += len(gdf)
-                games_frames.append(gdf)
-            if not pdf.empty:
-                total_box_rows += len(pdf)
-                box_frames.append(pdf)
-
-            time.sleep(0.2)
-        time.sleep(0.4)
-
-    if games_frames:
-        games_df = pd.concat(games_frames, ignore_index=True)
-        games_df = coerce_games_dtypes(games_df)
-        print(f"loading games rows: {len(games_df)}")
-        load_df(games_df, "games_daily")
+    
+    print(f"Fetching Yahoo data for {date_str}")
+    
+    # Get scoreboard for the date
+    scoreboard_data = get_yahoo_scoreboard(date_str)
+    if not scoreboard_data:
+        print(f"No scoreboard data found for {date_str}")
+        return
+    
+    # Extract games
+    games_df = extract_games_from_yahoo_scoreboard(scoreboard_data, date_str)
+    
+    if games_df.empty:
+        print(f"No games found for {date_str}")
+        return
+    
+    print(f"Found {len(games_df)} games for {date_str}")
+    
+    # Load games to BigQuery
+    load_df(games_df, "games_daily")
+    
+    # Fetch detailed game data and player stats
+    all_player_stats = []
+    
+    for _, game_row in games_df.iterrows():
+        game_id = game_row["event_id"]
+        print(f"Fetching details for game {game_id}")
+        
+        game_details = get_yahoo_game_details(game_id)
+        if not game_details:
+            print(f"No game details found for {game_id}")
+            continue
+        
+        player_stats_df = extract_player_stats_from_yahoo_game(game_details, game_id, date_str)
+        if not player_stats_df.empty:
+            all_player_stats.append(player_stats_df)
+            print(f"Found {len(player_stats_df)} player stats for game {game_id}")
+        else:
+            print(f"No player stats found for game {game_id}")
+        
+        # Be respectful to the API
+        time.sleep(0.5)
+    
+    # Load all player stats
+    if all_player_stats:
+        combined_player_stats = pd.concat(all_player_stats, ignore_index=True)
+        combined_player_stats = coerce_box_dtypes(combined_player_stats)
+        print(f"Loading {len(combined_player_stats)} player stat rows")
+        load_df(combined_player_stats, "player_boxscores")
     else:
-        print("no games to load")
+        print("No player stats to load")
 
-    if box_frames:
-        box_df = pd.concat(box_frames, ignore_index=True)
-        box_df = coerce_box_dtypes(box_df)
-        print(f"loading player box rows: {len(box_df)}")
-        load_df(box_df, "player_boxscores")
-    else:
-        print("no player boxes to load")
+def ingest_dates_via_yahoo(date_list: List[str]) -> None:
+    """
+    Ingest multiple dates using Yahoo Sports API
+    """
+    for date_str in date_list:
+        ingest_date_via_yahoo(date_str)
+        # Be respectful between dates
+        time.sleep(1)
 
-    print(f"summary - dates:{len(ymd_list)} events:{total_events} games_rows:{total_games_rows} box_rows:{total_box_rows}")
-
+# -----------------------------------
+# Main function
+# -----------------------------------
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Ingest NBA games and player box scores into BigQuery")
-    parser.add_argument("--mode", choices=["backfill", "daily"], required=True, help="backfill for a date range via ESPN, daily uses nba_api for boxes then ESPN for games")
+    parser = argparse.ArgumentParser(description="Ingest NBA games and player box scores into BigQuery using Yahoo Sports API")
+    parser.add_argument("--mode", choices=["daily", "backfill"], default="daily", help="daily for yesterday's games, backfill for a date range")
     parser.add_argument("--start", help="YYYY-MM-DD inclusive start for backfill")
     parser.add_argument("--end", help="YYYY-MM-DD inclusive end for backfill")
+    parser.add_argument("--date", help="YYYY-MM-DD specific date (overrides daily mode)")
     args = parser.parse_args()
 
+    if args.date:
+        # Specific date mode
+        ingest_date_via_yahoo(args.date)
+        print(f"Ingestion complete for {args.date}")
+        return
+
     if args.mode == "daily":
-        # yesterday in UTC - schedule your cron sufficiently late in the morning
-        yday = datetime.date.today() - datetime.timedelta(days=1)
-        date_iso = yday.isoformat()
-        print(f"daily via nba_api for {date_iso}")
-        ensure_tables()
-
-        # 1) try nba_api for player boxes on that date
-        try:
-            nba_df = fetch_player_boxes_via_nba_api(date_iso)
-            if not nba_df.empty:
-                print(f"nba_api player rows: {len(nba_df)}")
-                load_df(nba_df, "player_boxscores")
-            else:
-                print("nba_api returned 0 player rows - will rely on ESPN for players if present")
-        except Exception as e:
-            print(f"nba_api daily path errored: {e} - will rely on ESPN only")
-
-        # 2) always ingest games via ESPN for that date
-        ingest_dates_via_espn([yday.strftime('%Y%m%d')])
-        print(f"Daily ingest complete for {date_iso}")
+        # Yesterday's games
+        yesterday = datetime.date.today() - datetime.timedelta(days=1)
+        date_str = yesterday.isoformat()
+        ingest_date_via_yahoo(date_str)
+        print(f"Daily ingestion complete for {date_str}")
         return
 
     if args.mode == "backfill":
         if not args.start or not args.end:
-            print("Error - backfill needs --start and --end like 2024-10-01 and 2025-06-30")
+            print("Error - backfill needs --start and --end like 2024-10-01 and 2025-01-31")
             sys.exit(1)
+        
         try:
-            s = datetime.date.fromisoformat(args.start)
-            e = datetime.date.fromisoformat(args.end)
+            start_date = datetime.date.fromisoformat(args.start)
+            end_date = datetime.date.fromisoformat(args.end)
         except Exception:
             print("Error - invalid date format. Use YYYY-MM-DD")
             sys.exit(1)
-        if e < s:
+        
+        if end_date < start_date:
             print("Error - end date must be on or after start date")
             sys.exit(1)
-        dates = yyyymmdd_list(s, e)
-        ingest_dates_via_espn(dates)
+        
+        # Generate date list
+        date_list = []
+        current_date = start_date
+        while current_date <= end_date:
+            date_list.append(current_date.isoformat())
+            current_date += datetime.timedelta(days=1)
+        
+        print(f"Backfilling {len(date_list)} dates from {args.start} to {args.end}")
+        ingest_dates_via_yahoo(date_list)
         print(f"Backfill complete for {args.start} to {args.end}")
         return
 

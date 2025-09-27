@@ -131,6 +131,147 @@ def normalize_game_date(game_date_str: str, target_date: str) -> str:
         except:
             return target_date
 
+def build_date_to_games_mapping(target_date: str, search_window: int = 150) -> Dict[str, List[str]]:
+    """
+    Build a mapping of dates to game IDs with precise date estimation.
+    Updated to handle season transitions automatically.
+    """
+    print(f"Building date-to-games mapping for {target_date}")
+    
+    date_to_games: Dict[str, List[str]] = {}
+    
+    # Skip scoreboard API for historical dates (it only returns current/future games)
+    target_dt = datetime.datetime.strptime(target_date, "%Y-%m-%d")
+    today = datetime.datetime.now()
+    
+    if target_dt.date() >= today.date():
+        # Only try scoreboard for today/future dates
+        try:
+            print(f"Trying scoreboard API for current/future date {target_date}")
+            sb = scoreboard.ScoreBoard()
+            sb_data = sb.get_dict()
+            
+            if 'scoreboard' in sb_data and 'games' in sb_data['scoreboard']:
+                games = sb_data['scoreboard']['games']
+                print(f"Scoreboard API returned {len(games)} games")
+                
+                for game in games:
+                    game_id = game.get('gameId')
+                    game_date_utc = game.get('gameTimeUTC', '')
+                    
+                    if game_id and game_date_utc:
+                        normalized_date = normalize_game_date(game_date_utc, target_date)
+                        
+                        if normalized_date not in date_to_games:
+                            date_to_games[normalized_date] = []
+                        date_to_games[normalized_date].append(game_id)
+                        
+                        print(f"  {game_id}: {game_date_utc} -> {normalized_date}")
+                
+                if target_date in date_to_games:
+                    print(f"Found {len(date_to_games[target_date])} games via scoreboard API")
+                    return date_to_games
+            
+        except Exception as e:
+            print(f"Scoreboard API failed: {e}")
+    else:
+        print(f"Skipping scoreboard API for historical date {target_date}")
+    
+    # More precise game ID estimation for historical data
+    print("Using precise game ID scanning for historical data...")
+    
+    # Determine season and game ID format based on date
+    if target_dt >= datetime.datetime(2025, 10, 1):
+        # 2025-26 season and beyond
+        print("Using 2025-26 season format (002250xxxx)")
+        season_start = datetime.datetime(2025, 10, 21)  # Estimated 2025-26 season start
+        season_prefix = "002250"
+        first_game_id = 0  # 2025-26 season starts from 0022500000
+        
+        if target_dt < season_start:
+            print(f"Target date {target_date} is before 2025-26 season start")
+            return date_to_games
+            
+    else:
+        # 2024-25 season
+        print("Using 2024-25 season format (002240xxxx)")
+        season_start = datetime.datetime(2024, 10, 22)
+        season_prefix = "002240"
+        first_game_id = 61  # First game was 0022400061
+        
+        if target_dt < season_start:
+            print(f"Target date {target_date} is before 2024-25 season start (Oct 22, 2024)")
+            return date_to_games
+    
+    days_from_start = (target_dt - season_start).days
+    print(f"Days from season start: {days_from_start}")
+    
+    # Conservative approach: scan a smaller range more precisely
+    if days_from_start == 0:  # Season opener
+        start_id = first_game_id
+        end_id = first_game_id + 20
+    else:
+        # For later dates, estimate based on days from start
+        estimated_game_num = first_game_id + (days_from_start * 7)  # Conservative: 7 games/day average
+        start_id = max(estimated_game_num - search_window, first_game_id)
+        end_id = estimated_game_num + search_window
+    
+    print(f"Target date: {target_date} ({days_from_start} days from season start)")
+    print(f"Scanning game IDs {start_id} to {end_id} with prefix {season_prefix}")
+    
+    games_found = 0
+    target_games_found = 0
+    
+    for game_num in range(start_id, end_id + 1):
+        game_id = f"{season_prefix}{game_num:04d}"
+        
+        try:
+            box = boxscore.BoxScore(game_id)
+            box_data = box.get_dict()
+            
+            if 'game' in box_data:
+                game_info = box_data['game']
+                game_date_utc = game_info.get('gameTimeUTC', '')
+                
+                if game_date_utc:
+                    normalized_date = normalize_game_date(game_date_utc, target_date)
+                    
+                    if normalized_date not in date_to_games:
+                        date_to_games[normalized_date] = []
+                    date_to_games[normalized_date].append(game_id)
+                    games_found += 1
+                    
+                    # Count games for target date
+                    if normalized_date == target_date:
+                        target_games_found += 1
+                    
+                    teams = f"{game_info.get('awayTeam', {}).get('teamName', 'Unknown')} @ {game_info.get('homeTeam', {}).get('teamName', 'Unknown')}"
+                    date_marker = "🎯" if normalized_date == target_date else "  "
+                    print(f"{date_marker} {game_id}: {normalized_date} - {teams}")
+        
+        except Exception as e:
+            continue  # Game doesn't exist
+    
+    print(f"\nScan complete. Found {games_found} total games.")
+    print(f"Games found for target date {target_date}: {target_games_found}")
+    
+    # Show only dates close to target
+    sorted_dates = sorted(date_to_games.keys())
+    if sorted_dates:
+        print(f"\nDates with games found:")
+        for date in sorted_dates:
+            days_diff = abs((datetime.datetime.strptime(date, "%Y-%m-%d") - target_dt).days)
+            if days_diff <= 3:  # Only show dates within 3 days
+                marker = "🎯" if date == target_date else "  "
+                print(f"{marker} {date}: {len(date_to_games[date])} games (±{days_diff} days)")
+    
+    if target_date in date_to_games:
+        print(f"\nFound {len(date_to_games[target_date])} games for {target_date}")
+    else:
+        print(f"\nNo games found for {target_date}")
+    
+    return date_to_games
+
 def build_date_range_games_mapping(start_date: str, end_date: str, search_window: int = 150) -> Dict[str, List[str]]:
     """
     Build a mapping of dates to game IDs for a date range efficiently.

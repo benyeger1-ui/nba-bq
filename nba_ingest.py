@@ -695,7 +695,36 @@ def safe_str(x: Any) -> Optional[str]:
     except Exception:
         return None
 
-def parse_minutes(minutes_str: str) -> str:
+def get_games_for_date(target_date: str) -> pd.DataFrame:
+    """Get games for a specific date with improved date handling"""
+    print(f"Searching for games on {target_date}")
+    
+    # Build the date-to-games mapping
+    date_mapping = build_date_to_games_mapping(target_date)
+    
+    if target_date not in date_mapping:
+        print(f"No games found for {target_date}")
+        return pd.DataFrame(columns=[f.name for f in GAMES_SCHEMA])
+    
+    game_ids = date_mapping[target_date]
+    print(f"Found {len(game_ids)} games for {target_date}: {game_ids}")
+    
+    # Get game data for each game ID
+    games_data = []
+    for game_id in game_ids:
+        try:
+            box = boxscore.BoxScore(game_id)
+            box_data = box.get_dict()
+            
+            if 'game' in box_data:
+                games_data.append(box_data['game'])
+        except Exception as e:
+            print(f"Error getting game data for {game_id}: {e}")
+    
+    if games_data:
+        return extract_games_from_game_data(games_data, target_date)
+    else:
+        return pd.DataFrame(columns=[f.name for f in GAMES_SCHEMA])
     """Convert NBA API time format PT32M33.00S to readable format"""
     try:
         if not minutes_str or minutes_str == "PT00M00.00S":

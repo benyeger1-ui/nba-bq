@@ -128,6 +128,138 @@ def normalize_game_date(game_date_str: str, target_date: str) -> str:
         except:
             return target_date
 
+def build_optimized_date_range_games_mapping(start_date: str, end_date: str) -> Dict[str, List[str]]:
+    """
+    Optimized approach: Calculate minimum and maximum game IDs for the entire range,
+    then scan once and filter by date range.
+    """
+    print(f"Building optimized date-to-games mapping for range {start_date} to {end_date}")
+    
+    start_dt = datetime.datetime.strptime(start_date, "%Y-%m-%d")
+    end_dt = datetime.datetime.strptime(end_date, "%Y-%m-%d")
+    
+    # Season boundary
+    season_boundary = datetime.datetime(2025, 10, 1)
+    
+    date_to_games: Dict[str, List[str]] = {}
+    
+    if start_dt < season_boundary and end_dt >= season_boundary:
+        # Range crosses seasons - process each season separately
+        print("Date range crosses season boundary, processing separately...")
+        
+        # Process 2024-25 season part
+        season_end_2024 = min(end_dt, season_boundary - datetime.timedelta(days=1))
+        if start_dt < season_boundary:
+            print(f"Processing 2024-25 season: {start_date} to {season_end_2024.strftime('%Y-%m-%d')}")
+            mapping1 = scan_season_range(start_date, season_end_2024.strftime('%Y-%m-%d'), 
+                                       "002240", 61, datetime.datetime(2024, 10, 22))
+            date_to_games.update(mapping1)
+        
+        # Process 2025-26 season part
+        if end_dt >= season_boundary:
+            season_start_2025 = max(start_dt, season_boundary)
+            print(f"Processing 2025-26 season: {season_start_2025.strftime('%Y-%m-%d')} to {end_date}")
+            mapping2 = scan_season_range(season_start_2025.strftime('%Y-%m-%d'), end_date,
+                                       "002250", 0, datetime.datetime(2025, 10, 21))
+            date_to_games.update(mapping2)
+    
+    else:
+        # Single season range
+        if start_dt >= season_boundary:
+            # 2025-26 season
+            print("Processing 2025-26 season range")
+            mapping = scan_season_range(start_date, end_date, "002250", 0, datetime.datetime(2025, 10, 21))
+        else:
+            # 2024-25 season
+            print("Processing 2024-25 season range")
+            mapping = scan_season_range(start_date, end_date, "002240", 61, datetime.datetime(2024, 10, 22))
+        
+        date_to_games.update(mapping)
+    
+    # Filter results to only include dates within the requested range
+    filtered_mapping = {}
+    for date_str, game_ids in date_to_games.items():
+        date_dt = datetime.datetime.strptime(date_str, "%Y-%m-%d")
+        if start_dt <= date_dt <= end_dt:
+            filtered_mapping[date_str] = game_ids
+    
+    total_games = sum(len(games) for games in filtered_mapping.values())
+    print(f"\nOptimized scan complete:")
+    print(f"  Date range: {start_date} to {end_date}")
+    print(f"  Total games found: {total_games} across {len(filtered_mapping)} dates")
+    
+    return filtered_mapping
+
+def scan_season_range(start_date: str, end_date: str, season_prefix: str, 
+                     first_game_id: int, season_start: datetime.datetime) -> Dict[str, List[str]]:
+    """
+    Scan a single season range efficiently by calculating min/max game IDs once.
+    """
+    start_dt = datetime.datetime.strptime(start_date, "%Y-%m-%d")
+    end_dt = datetime.datetime.strptime(end_date, "%Y-%m-%d")
+    
+    date_to_games: Dict[str, List[str]] = {}
+    
+    # Skip if entire range is before season start
+    if end_dt < season_start:
+        print(f"Range {start_date} to {end_date} is before season start")
+        return date_to_games
+    
+    # Calculate the absolute minimum and maximum game IDs for the range
+    effective_start = max(start_dt, season_start)
+    
+    min_days_from_start = max(0, (effective_start - season_start).days)
+    max_days_from_start = max(0, (end_dt - season_start).days)
+    
+    # Calculate game ID bounds with conservative estimates
+    min_game_estimate = first_game_id + (min_days_from_start * 5)  # Conservative: 5 games/day minimum
+    max_game_estimate = first_game_id + (max_days_from_start * 15)  # Liberal: 15 games/day maximum
+    
+    # Add safety buffers
+    start_id = max(min_game_estimate - 50, first_game_id)
+    end_id = max_game_estimate + 50
+    
+    print(f"  Scanning {season_prefix} range: game IDs {start_id} to {end_id}")
+    print(f"  Date range: {start_date} to {end_date} ({max_days_from_start - min_days_from_start + 1} days)")
+    
+    games_found = 0
+    range_games_found = 0
+    
+    for game_num in range(start_id, end_id + 1):
+        game_id = f"{season_prefix}{game_num:04d}"
+        
+        try:
+            box = boxscore.BoxScore(game_id)
+            box_data = box.get_dict()
+            
+            if 'game' in box_data:
+                game_info = box_data['game']
+                game_date_utc = game_info.get('gameTimeUTC', '')
+                
+                if game_date_utc:
+                    normalized_date = normalize_game_date(game_date_utc, start_date)
+                    normalized_dt = datetime.datetime.strptime(normalized_date, "%Y-%m-%d")
+                    
+                    # Only include games within our target range
+                    if start_dt <= normalized_dt <= end_dt:
+                        if normalized_date not in date_to_games:
+                            date_to_games[normalized_date] = []
+                        date_to_games[normalized_date].append(game_id)
+                        range_games_found += 1
+                    
+                    games_found += 1
+                    
+                    # Show progress for range games
+                    if start_dt <= normalized_dt <= end_dt:
+                        teams = f"{game_info.get('awayTeam', {}).get('teamName', 'Unknown')} @ {game_info.get('homeTeam', {}).get('teamName', 'Unknown')}"
+                        print(f"  ✓ {game_id}: {normalized_date} - {teams}")
+        
+        except Exception:
+            continue  # Game doesn't exist
+    
+    print(f"  Season scan complete: {range_games_found} games in range ({games_found} total games found)")
+    return date_to_games
+
 def build_date_to_games_mapping(target_date: str, search_window: int = 150) -> Dict[str, List[str]]:
     """
     Build a mapping of dates to game IDs with precise date estimation.
@@ -174,229 +306,19 @@ def build_date_to_games_mapping(target_date: str, search_window: int = 150) -> D
     else:
         print(f"Skipping scoreboard API for historical date {target_date}")
     
-    # More precise game ID estimation for historical data
-    print("Using precise game ID scanning for historical data...")
-    
-    # Determine season and game ID format based on date
-    if target_dt >= datetime.datetime(2025, 10, 1):
-        # 2025-26 season and beyond
-        print("Using 2025-26 season format (002250xxxx)")
-        season_start = datetime.datetime(2025, 10, 21)  # Estimated 2025-26 season start
-        season_prefix = "002250"
-        first_game_id = 0  # 2025-26 season starts from 0022500000
-        
-        if target_dt < season_start:
-            print(f"Target date {target_date} is before 2025-26 season start")
-            return date_to_games
-            
-    else:
-        # 2024-25 season
-        print("Using 2024-25 season format (002240xxxx)")
-        season_start = datetime.datetime(2024, 10, 22)
-        season_prefix = "002240"
-        first_game_id = 61  # First game was 0022400061
-        
-        if target_dt < season_start:
-            print(f"Target date {target_date} is before 2024-25 season start (Oct 22, 2024)")
-            return date_to_games
-    
-    days_from_start = (target_dt - season_start).days
-    print(f"Days from season start: {days_from_start}")
-    
-    # Conservative approach: scan a smaller range more precisely
-    if days_from_start == 0:  # Season opener
-        start_id = first_game_id
-        end_id = first_game_id + 20
-    else:
-        # For later dates, estimate based on days from start
-        estimated_game_num = first_game_id + (days_from_start * 7)  # Conservative: 7 games/day average
-        start_id = max(estimated_game_num - search_window, first_game_id)
-        end_id = estimated_game_num + search_window
-    
-    print(f"Target date: {target_date} ({days_from_start} days from season start)")
-    print(f"Scanning game IDs {start_id} to {end_id} with prefix {season_prefix}")
-    
-    games_found = 0
-    target_games_found = 0
-    
-    for game_num in range(start_id, end_id + 1):
-        game_id = f"{season_prefix}{game_num:04d}"
-        
-        try:
-            box = boxscore.BoxScore(game_id)
-            box_data = box.get_dict()
-            
-            if 'game' in box_data:
-                game_info = box_data['game']
-                game_date_utc = game_info.get('gameTimeUTC', '')
-                
-                if game_date_utc:
-                    normalized_date = normalize_game_date(game_date_utc, target_date)
-                    
-                    if normalized_date not in date_to_games:
-                        date_to_games[normalized_date] = []
-                    date_to_games[normalized_date].append(game_id)
-                    games_found += 1
-                    
-                    # Count games for target date
-                    if normalized_date == target_date:
-                        target_games_found += 1
-                    
-                    teams = f"{game_info.get('awayTeam', {}).get('teamName', 'Unknown')} @ {game_info.get('homeTeam', {}).get('teamName', 'Unknown')}"
-                    date_marker = "🎯" if normalized_date == target_date else "  "
-                    print(f"{date_marker} {game_id}: {normalized_date} - {teams}")
-        
-        except Exception as e:
-            continue  # Game doesn't exist
-    
-    print(f"\nScan complete. Found {games_found} total games.")
-    print(f"Games found for target date {target_date}: {target_games_found}")
-    
-    # Show only dates close to target
-    sorted_dates = sorted(date_to_games.keys())
-    if sorted_dates:
-        print(f"\nDates with games found:")
-        for date in sorted_dates:
-            days_diff = abs((datetime.datetime.strptime(date, "%Y-%m-%d") - target_dt).days)
-            if days_diff <= 3:  # Only show dates within 3 days
-                marker = "🎯" if date == target_date else "  "
-                print(f"{marker} {date}: {len(date_to_games[date])} games (±{days_diff} days)")
-    
-    if target_date in date_to_games:
-        print(f"\nFound {len(date_to_games[target_date])} games for {target_date}")
-    else:
-        print(f"\nNo games found for {target_date}")
-    
-    return date_to_games
-
-def build_date_range_games_mapping(start_date: str, end_date: str) -> Dict[str, List[str]]:
-    """
-    Build a mapping of dates to game IDs for a date range efficiently.
-    Handles cross-season ranges by splitting into appropriate chunks.
-    """
-    print(f"Building date-to-games mapping for range {start_date} to {end_date}")
-    
-    date_to_games: Dict[str, List[str]] = {}
-    
-    start_dt = datetime.datetime.strptime(start_date, "%Y-%m-%d")
-    end_dt = datetime.datetime.strptime(end_date, "%Y-%m-%d")
-    
-    # Check if range crosses season boundary (October 1, 2025)
-    season_boundary = datetime.datetime(2025, 10, 1)
-    
-    if start_dt < season_boundary and end_dt >= season_boundary:
-        # Range crosses seasons - split into two parts
-        print("Date range crosses season boundary, splitting...")
-        
-        # Part 1: 2024-25 season (start_date to Sept 30, 2025)
-        part1_end = "2025-09-30"
-        print(f"Processing 2024-25 season: {start_date} to {part1_end}")
-        mapping1 = build_single_season_games_mapping(start_date, part1_end, "002240", 61, datetime.datetime(2024, 10, 22))
-        date_to_games.update(mapping1)
-        
-        # Part 2: 2025-26 season (Oct 1, 2025 to end_date)
-        part2_start = "2025-10-01"
-        print(f"Processing 2025-26 season: {part2_start} to {end_date}")
-        mapping2 = build_single_season_games_mapping(part2_start, end_date, "002250", 0, datetime.datetime(2025, 10, 21))
-        date_to_games.update(mapping2)
-        
-    else:
-        # Range is within a single season
-        if start_dt >= season_boundary:
-            # 2025-26 season
-            print("Using 2025-26 season format (002250xxxx)")
-            mapping = build_single_season_games_mapping(start_date, end_date, "002250", 0, datetime.datetime(2025, 10, 21))
-        else:
-            # 2024-25 season
-            print("Using 2024-25 season format (002240xxxx)")
-            mapping = build_single_season_games_mapping(start_date, end_date, "002240", 61, datetime.datetime(2024, 10, 22))
-        
-        date_to_games.update(mapping)
-    
-    print(f"\nRange scan complete. Found {sum(len(games) for games in date_to_games.values())} total games across {len(date_to_games)} dates")
-    
-    # Show summary by date
-    for date in sorted(date_to_games.keys()):
-        print(f"  {date}: {len(date_to_games[date])} games")
-    
-    return date_to_games
-
-def build_single_season_games_mapping(start_date: str, end_date: str, season_prefix: str, first_game_id: int, season_start: datetime.datetime) -> Dict[str, List[str]]:
-    """
-    Build games mapping for a single season range.
-    """
-    start_dt = datetime.datetime.strptime(start_date, "%Y-%m-%d")
-    end_dt = datetime.datetime.strptime(end_date, "%Y-%m-%d")
-    
-    date_to_games: Dict[str, List[str]] = {}
-    
-    # Skip if before season start
-    if end_dt < season_start:
-        print(f"Date range ends before season start")
-        return date_to_games
-    
-    # Adjust start date if before season start
-    effective_start = max(start_dt, season_start)
-    
-    # Calculate search range based on the entire date range
-    start_days = max(0, (effective_start - season_start).days)
-    end_days = max(0, (end_dt - season_start).days)
-    
-    # Estimate game ID range for the entire period
-    start_game_estimate = first_game_id + (start_days * 7)  # 7 games per day average
-    end_game_estimate = first_game_id + (end_days * 7)
-    
-    # Add buffer for safety
-    buffer = 100
-    start_id = max(start_game_estimate - buffer, first_game_id)
-    end_id = end_game_estimate + buffer
-    
-    print(f"Scanning game IDs {start_id} to {end_id} with prefix {season_prefix}")
-    print(f"Expected range covers {end_days - start_days + 1} days")
-    
-    games_found = 0
-    
-    for game_num in range(start_id, end_id + 1):
-        game_id = f"{season_prefix}{game_num:04d}"
-        
-        try:
-            box = boxscore.BoxScore(game_id)
-            box_data = box.get_dict()
-            
-            if 'game' in box_data:
-                game_info = box_data['game']
-                game_date_utc = game_info.get('gameTimeUTC', '')
-                
-                if game_date_utc:
-                    normalized_date = normalize_game_date(game_date_utc, start_date)
-                    
-                    # Only include games within our target range
-                    normalized_dt = datetime.datetime.strptime(normalized_date, "%Y-%m-%d")
-                    if start_dt <= normalized_dt <= end_dt:
-                        if normalized_date not in date_to_games:
-                            date_to_games[normalized_date] = []
-                        date_to_games[normalized_date].append(game_id)
-                        games_found += 1
-                        
-                        teams = f"{game_info.get('awayTeam', {}).get('teamName', 'Unknown')} @ {game_info.get('homeTeam', {}).get('teamName', 'Unknown')}"
-                        print(f"✓ {game_id}: {normalized_date} - {teams}")
-        
-        except Exception:
-            continue
-    
-    print(f"Found {games_found} games for this season range")
-    return date_to_games
+    # Use the optimized range scan for single dates too
+    return build_optimized_date_range_games_mapping(target_date, target_date)
 
 def ingest_date_range_nba_live(start_date: str, end_date: str) -> None:
     """
-    Efficiently ingest NBA data for a date range by scanning once and bulk inserting.
+    Efficiently ingest NBA data for a date range using optimized scanning.
     """
     ensure_tables()
     
-    print(f"Starting NBA data ingestion for range {start_date} to {end_date}")
+    print(f"Starting optimized NBA data ingestion for range {start_date} to {end_date}")
     
-    # Get all games for the entire range at once
-    date_mapping = build_date_range_games_mapping(start_date, end_date)
+    # Get all games for the entire range at once using optimized method
+    date_mapping = build_optimized_date_range_games_mapping(start_date, end_date)
     
     if not date_mapping:
         print(f"No games found for date range {start_date} to {end_date}")
@@ -406,7 +328,11 @@ def ingest_date_range_nba_live(start_date: str, end_date: str) -> None:
     all_player_stats = []
     
     # Process each date's games
-    for date_str, game_ids in date_mapping.items():
+    total_games = sum(len(game_ids) for game_ids in date_mapping.values())
+    processed_games = 0
+    
+    for date_str in sorted(date_mapping.keys()):
+        game_ids = date_mapping[date_str]
         print(f"\nProcessing {len(game_ids)} games for {date_str}")
         
         # Get game data
@@ -423,6 +349,10 @@ def ingest_date_range_nba_live(start_date: str, end_date: str) -> None:
                     if not player_stats.empty:
                         all_player_stats.append(player_stats)
                         print(f"  {game_id}: {len(player_stats)} players")
+                
+                processed_games += 1
+                if processed_games % 10 == 0:
+                    print(f"  Progress: {processed_games}/{total_games} games processed")
                 
                 time.sleep(0.2)  # Small delay to be nice to the API
                 
@@ -459,7 +389,7 @@ def ingest_date_range_nba_live(start_date: str, end_date: str) -> None:
         load_df(combined_stats, "player_boxscores")
         print(f"✅ Bulk loaded {len(combined_stats)} player records to BigQuery")
     
-    print(f"\n🎉 Bulk ingestion complete for {start_date} to {end_date}")
+    print(f"\n🎉 Optimized bulk ingestion complete for {start_date} to {end_date}")
     print(f"   Games: {len(all_games_data)} across {len(date_mapping)} dates")
     print(f"   Players: {len(combined_stats) if all_player_stats else 0} total records")
 
@@ -496,10 +426,10 @@ def extract_games_from_game_data(games_data: List[Dict], target_date: str) -> pd
         })
     
     if not games_rows:
-    if games_data:
-        return extract_games_from_game_data(games_data, target_date)
-    else:
         return pd.DataFrame(columns=[f.name for f in GAMES_SCHEMA])
+    
+    df = pd.DataFrame(games_rows)
+    return coerce_games_dtypes(df)
 
 def get_player_stats_for_game(game_id: str, date_str: str) -> pd.DataFrame:
     """Get complete player statistics for a specific game"""
@@ -628,65 +558,6 @@ def ingest_date_nba_live(date_str: str) -> None:
         print("No player statistics found")
     
     print(f"Ingestion complete for {date_str}")
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Ingest NBA data using NBA Live API")
-    parser.add_argument("--mode", choices=["daily", "backfill"], default="daily")
-    parser.add_argument("--start", help="YYYY-MM-DD start date for backfill")
-    parser.add_argument("--end", help="YYYY-MM-DD end date for backfill")
-    parser.add_argument("--date", help="YYYY-MM-DD specific date")
-    args = parser.parse_args()
-
-    if args.date:
-        # Single date processing
-        ingest_date_nba_live(args.date)
-        return
-
-    if args.mode == "daily":
-        # Daily processing (yesterday)
-        yesterday = datetime.date.today() - datetime.timedelta(days=1)
-        ingest_date_nba_live(yesterday.isoformat())
-        return
-
-    if args.mode == "backfill":
-        if not args.start or not args.end:
-            print("Error: backfill requires --start and --end dates")
-            sys.exit(1)
-        
-        # Always use efficient range-based ingestion for backfill
-        start_date = datetime.date.fromisoformat(args.start)
-        end_date = datetime.date.fromisoformat(args.end)
-        date_diff = (end_date - start_date).days + 1
-        
-        if date_diff <= 60:
-            # Small to medium range, use efficient bulk method
-            print(f"Processing date range: {args.start} to {args.end} ({date_diff} days)")
-            ingest_date_range_nba_live(args.start, args.end)
-        else:
-            # Large range, break into chunks
-            print(f"Processing large date range: {args.start} to {args.end} ({date_diff} days)")
-            print("Breaking into 60-day chunks for efficiency...")
-            
-            current_start = start_date
-            while current_start <= end_date:
-                chunk_end = min(current_start + datetime.timedelta(days=59), end_date)
-                
-                print(f"\nProcessing chunk: {current_start.isoformat()} to {chunk_end.isoformat()}")
-                ingest_date_range_nba_live(current_start.isoformat(), chunk_end.isoformat())
-                
-                current_start = chunk_end + datetime.timedelta(days=1)
-                
-                if current_start <= end_date:
-                    print("Waiting 10 seconds between chunks...")
-                    time.sleep(10)
-        
-        print(f"\nBackfill complete from {args.start} to {args.end}")
-
-if __name__ == "__main__":
-    main()SCHEMA])
-    
-    df = pd.DataFrame(games_rows)
-    return coerce_games_dtypes(df)
 
 def ensure_dataset() -> None:
     ds_id = f"{PROJECT_ID}.{DATASET}"
@@ -825,179 +696,6 @@ def get_games_for_date(target_date: str) -> pd.DataFrame:
         return extract_games_from_game_data(games_data, target_date)
     else:
         return pd.DataFrame(columns=[f.name for f in GAMES_SCHEMA])
-    """Convert NBA API time format PT32M33.00S to readable format"""
-    try:
-        if not minutes_str or minutes_str == "PT00M00.00S":
-            return "0:00"
-        
-        clean_str = minutes_str.replace("PT", "").replace("S", "")
-        if "M" in clean_str:
-            parts = clean_str.split("M")
-            minutes = int(parts[0])
-            seconds = int(float(parts[1])) if len(parts) > 1 and parts[1] else 0
-            return f"{minutes}:{seconds:02d}"
-        return "0:00"
-    except Exception:
-        return "0:00"
-
-def get_games_for_date(target_date: str) -> pd.DataFrame:
-    """Get games for a specific date with improved date handling"""
-    print(f"Searching for games on {target_date}")
-    
-    # Build the date-to-games mapping
-    date_mapping = build_date_to_games_mapping(target_date)
-    
-    if target_date not in date_mapping:
-        print(f"No games found for {target_date}")
-        return pd.DataFrame(columns=[f.name for f in GAMES_SCHEMA])
-    
-    game_ids = date_mapping[target_date]
-    print(f"Found {len(game_ids)} games for {target_date}: {game_ids}")
-    
-    # Get game data for each game ID
-    games_data = []
-    for game_id in game_ids:
-        try:
-            box = boxscore.BoxScore(game_id)
-            box_data = box.get_dict()
-            
-            if 'game' in box_data:
-                games_data.append(box_data['game'])
-        except Exception as e:
-            print(f"Error getting game data for {game_id}: {e}")
-    
-    if games_data:
-        return extract_games_from_game_data(games_data, target_date)
-    else:
-        return pd.DataFrame(columns=[f.name for f in GAMES_SCHEMA])
-
-def get_player_stats_for_game(game_id: str, date_str: str) -> pd.DataFrame:
-    """Get complete player statistics for a specific game"""
-    try:
-        box = boxscore.BoxScore(game_id)
-        box_data = box.get_dict()
-        
-        if 'game' not in box_data:
-            print(f"No game data found for {game_id}")
-            return pd.DataFrame(columns=[f.name for f in BOX_SCHEMA])
-        
-        game_info = box_data['game']
-        
-        # Use the date_str parameter consistently
-        year = int(date_str[:4])
-        month = int(date_str[5:7])
-        season = year if month >= 10 else year - 1
-        
-        players_data = []
-        
-        for team_type in ['homeTeam', 'awayTeam']:
-            if team_type not in game_info:
-                continue
-                
-            team = game_info[team_type]
-            team_id = safe_int(team.get('teamId'))
-            team_abbr = team.get('teamTricode')
-            
-            players = team.get('players', [])
-            
-            for player in players:
-                if player.get('status') != 'ACTIVE':
-                    continue
-                
-                player_id = safe_int(player.get('personId'))
-                player_name = player.get('name')
-                jersey_num = player.get('jerseyNum')
-                position = player.get('position')
-                starter = player.get('starter') == '1'
-                
-                stats = player.get('statistics', {})
-                
-                player_row = {
-                    "event_id": game_id,
-                    "date": date_str,  # Use the passed date_str consistently
-                    "season": season,
-                    "team_id": team_id,
-                    "team_abbr": team_abbr,
-                    "player_id": player_id,
-                    "player": player_name,
-                    "starter": starter,
-                    "minutes": parse_minutes(stats.get('minutes', 'PT00M00.00S')),
-                    "pts": safe_int(stats.get('points', 0)),
-                    "reb": safe_int(stats.get('reboundsTotal', 0)),
-                    "ast": safe_int(stats.get('assists', 0)),
-                    "stl": safe_int(stats.get('steals', 0)),
-                    "blk": safe_int(stats.get('blocks', 0)),
-                    "tov": safe_int(stats.get('turnovers', 0)),
-                    "fgm": safe_int(stats.get('fieldGoalsMade', 0)),
-                    "fga": safe_int(stats.get('fieldGoalsAttempted', 0)),
-                    "fg_pct": safe_float(stats.get('fieldGoalsPercentage', 0)),
-                    "fg3m": safe_int(stats.get('threePointersMade', 0)),
-                    "fg3a": safe_int(stats.get('threePointersAttempted', 0)),
-                    "fg3_pct": safe_float(stats.get('threePointersPercentage', 0)),
-                    "ftm": safe_int(stats.get('freeThrowsMade', 0)),
-                    "fta": safe_int(stats.get('freeThrowsAttempted', 0)),
-                    "ft_pct": safe_float(stats.get('freeThrowsPercentage', 0)),
-                    "oreb": safe_int(stats.get('reboundsOffensive', 0)),
-                    "dreb": safe_int(stats.get('reboundsDefensive', 0)),
-                    "pf": safe_int(stats.get('foulsPersonal', 0)),
-                    "plus_minus": safe_float(stats.get('plusMinusPoints', 0)),
-                    "position": position,
-                    "jersey_num": jersey_num
-                }
-                
-                players_data.append(player_row)
-        
-        if not players_data:
-            print(f"No player data found for game {game_id}")
-            return pd.DataFrame(columns=[f.name for f in BOX_SCHEMA])
-        
-        df = pd.DataFrame(players_data)
-        return coerce_box_dtypes(df)
-        
-    except Exception as e:
-        print(f"Error getting player stats for game {game_id}: {e}")
-        return pd.DataFrame(columns=[f.name for f in BOX_SCHEMA])
-
-def ingest_date_nba_live(date_str: str) -> None:
-    """Ingest NBA data for a specific date using NBA Live API"""
-    ensure_tables()
-    
-    print(f"Starting NBA data ingestion for {date_str}")
-    
-    games_df = get_games_for_date(date_str)
-    
-    if games_df.empty:
-        print(f"No games found for {date_str}")
-        return
-    
-    print(f"Found {len(games_df)} games for {date_str}")
-    
-    load_df(games_df, "games_daily")
-    print(f"Loaded {len(games_df)} games to BigQuery")
-    
-    all_player_stats = []
-    
-    for _, game_row in games_df.iterrows():
-        game_id = game_row["event_id"]
-        print(f"Fetching player stats for game {game_id}")
-        
-        player_stats = get_player_stats_for_game(game_id, date_str)
-        
-        if not player_stats.empty:
-            all_player_stats.append(player_stats)
-            print(f"Found {len(player_stats)} player records for game {game_id}")
-        
-        time.sleep(0.3)
-    
-    if all_player_stats:
-        combined_stats = pd.concat(all_player_stats, ignore_index=True)
-        
-        print(f"Loading {len(combined_stats)} total player records to BigQuery")
-        load_df(combined_stats, "player_boxscores")
-    else:
-        print("No player statistics found")
-    
-    print(f"Ingestion complete for {date_str}")
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Ingest NBA data using NBA Live API")
@@ -1008,10 +706,12 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.date:
+        # Single date processing
         ingest_date_nba_live(args.date)
         return
 
     if args.mode == "daily":
+        # Daily processing (yesterday)
         yesterday = datetime.date.today() - datetime.timedelta(days=1)
         ingest_date_nba_live(yesterday.isoformat())
         return
@@ -1021,16 +721,34 @@ def main() -> None:
             print("Error: backfill requires --start and --end dates")
             sys.exit(1)
         
+        # Always use efficient range-based ingestion for backfill
         start_date = datetime.date.fromisoformat(args.start)
         end_date = datetime.date.fromisoformat(args.end)
+        date_diff = (end_date - start_date).days + 1
         
-        current_date = start_date
-        while current_date <= end_date:
-            ingest_date_nba_live(current_date.isoformat())
-            current_date += datetime.timedelta(days=1)
-            time.sleep(2)
+        if date_diff <= 60:
+            # Small to medium range, use efficient bulk method
+            print(f"Processing date range: {args.start} to {args.end} ({date_diff} days)")
+            ingest_date_range_nba_live(args.start, args.end)
+        else:
+            # Large range, break into chunks
+            print(f"Processing large date range: {args.start} to {args.end} ({date_diff} days)")
+            print("Breaking into 60-day chunks for efficiency...")
+            
+            current_start = start_date
+            while current_start <= end_date:
+                chunk_end = min(current_start + datetime.timedelta(days=59), end_date)
+                
+                print(f"\nProcessing chunk: {current_start.isoformat()} to {chunk_end.isoformat()}")
+                ingest_date_range_nba_live(current_start.isoformat(), chunk_end.isoformat())
+                
+                current_start = chunk_end + datetime.timedelta(days=1)
+                
+                if current_start <= end_date:
+                    print("Waiting 10 seconds between chunks...")
+                    time.sleep(10)
         
-        print(f"Backfill complete from {args.start} to {args.end}")
+        print(f"\nBackfill complete from {args.start} to {args.end}")
 
 if __name__ == "__main__":
     main()

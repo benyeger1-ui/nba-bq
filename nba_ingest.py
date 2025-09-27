@@ -32,7 +32,7 @@ ET_TZ = pytz.timezone('US/Eastern')
 UTC_TZ = pytz.timezone('UTC')
 
 # -----------------------------------
-# BigQuery schemas (same as before)
+# BigQuery schemas
 # -----------------------------------
 GAMES_SCHEMA = [
     bigquery.SchemaField("event_id", "STRING"),
@@ -131,9 +131,10 @@ def normalize_game_date(game_date_str: str, target_date: str) -> str:
         except:
             return target_date
 
-def build_date_to_games_mapping(target_date: str, search_window: int = 30) -> Dict[str, List[str]]:
+def build_date_to_games_mapping(target_date: str, search_window: int = 150) -> Dict[str, List[str]]:
     """
     Build a mapping of dates to game IDs with precise date estimation.
+    Updated to handle season transitions automatically.
     """
     print(f"Building date-to-games mapping for {target_date}")
     
@@ -179,50 +180,50 @@ def build_date_to_games_mapping(target_date: str, search_window: int = 30) -> Di
     # More precise game ID estimation for historical data
     print("Using precise game ID scanning for historical data...")
     
-    # NBA 2024-25 season start: October 22, 2024
-    season_start = datetime.datetime(2024, 10, 22)
-    
-    if target_dt < season_start:
-        print(f"Target date {target_date} is before season start (Oct 22, 2024)")
-        return date_to_games
+    # Determine season and game ID format based on date
+    if target_dt >= datetime.datetime(2025, 10, 1):
+        # 2025-26 season and beyond
+        print("Using 2025-26 season format (002250xxxx)")
+        season_start = datetime.datetime(2025, 10, 21)  # Estimated 2025-26 season start
+        season_prefix = "002250"
+        first_game_id = 0  # 2025-26 season starts from 0022500000
+        
+        if target_dt < season_start:
+            print(f"Target date {target_date} is before 2025-26 season start")
+            return date_to_games
+            
+    else:
+        # 2024-25 season
+        print("Using 2024-25 season format (002240xxxx)")
+        season_start = datetime.datetime(2024, 10, 22)
+        season_prefix = "002240"
+        first_game_id = 61  # First game was 0022400061
+        
+        if target_dt < season_start:
+            print(f"Target date {target_date} is before 2024-25 season start (Oct 22, 2024)")
+            return date_to_games
     
     days_from_start = (target_dt - season_start).days
-    
-    # More precise mapping based on known game IDs:
-    # Oct 22 (day 0): games around 90-100
-    # Oct 23 (day 1): games around 101-108
-    # Oct 24 (day 2): games around 109-119
-    # etc.
+    print(f"Days from season start: {days_from_start}")
     
     # Conservative approach: scan a smaller range more precisely
-    if days_from_start == 0:  # Oct 22
-        start_id, end_id = 90, 105
-    elif days_from_start == 1:  # Oct 23  
-        start_id, end_id = 100, 115
-    elif days_from_start == 2:  # Oct 24
-        start_id, end_id = 110, 125
-    elif days_from_start == 3:  # Oct 25
-        start_id, end_id = 115, 135
-    elif days_from_start == 4:  # Oct 26
-        start_id, end_id = 125, 145
-    elif days_from_start == 5:  # Oct 27
-        start_id, end_id = 135, 155
-    elif days_from_start == 6:  # Oct 28
-        start_id, end_id = 105, 125  # More focused range for Oct 28
+    if days_from_start == 0:  # Season opener
+        start_id = first_game_id
+        end_id = first_game_id + 20
     else:
-        # For later dates, use the original estimation but with smaller window
-        estimated_game_num = 90 + (days_from_start * 10)  # More conservative: 10 games/day
-        start_id = max(estimated_game_num - search_window, 90)
+        # For later dates, estimate based on days from start
+        estimated_game_num = first_game_id + (days_from_start * 7)  # Conservative: 7 games/day average
+        start_id = max(estimated_game_num - search_window, first_game_id)
         end_id = estimated_game_num + search_window
     
     print(f"Target date: {target_date} ({days_from_start} days from season start)")
-    print(f"Scanning game IDs {start_id} to {end_id}")
+    print(f"Scanning game IDs {start_id} to {end_id} with prefix {season_prefix}")
     
     games_found = 0
     target_games_found = 0
     
     for game_num in range(start_id, end_id + 1):
-        game_id = f"002240{game_num:04d}"
+        game_id = f"{season_prefix}{game_num:04d}"
         
         try:
             box = boxscore.BoxScore(game_id)
@@ -309,7 +310,6 @@ def extract_games_from_game_data(games_data: List[Dict], target_date: str) -> pd
     df = pd.DataFrame(games_rows)
     return coerce_games_dtypes(df)
 
-# Keep all the existing utility functions unchanged
 def ensure_dataset() -> None:
     ds_id = f"{PROJECT_ID}.{DATASET}"
     try:
@@ -418,16 +418,17 @@ def parse_minutes(minutes_str: str) -> str:
         return "0:00"
 
 def get_games_for_date(target_date: str) -> pd.DataFrame:
-    """Get games for a specific date using improved date-based search"""
+    """Get games for a specific date with improved date handling"""
     print(f"Searching for games on {target_date}")
     
-    # Get game IDs for the target date
-    game_ids = get_games_for_date_direct(target_date)
+    # Build the date-to-games mapping
+    date_mapping = build_date_to_games_mapping(target_date)
     
-    if not game_ids:
+    if target_date not in date_mapping:
         print(f"No games found for {target_date}")
         return pd.DataFrame(columns=[f.name for f in GAMES_SCHEMA])
     
+    game_ids = date_mapping[target_date]
     print(f"Found {len(game_ids)} games for {target_date}: {game_ids}")
     
     # Get game data for each game ID
@@ -567,7 +568,6 @@ def ingest_date_nba_live(date_str: str) -> None:
     
     if all_player_stats:
         combined_stats = pd.concat(all_player_stats, ignore_index=True)
-        combined_stats = coerce_box_dtypes(combined_stats)
         
         print(f"Loading {len(combined_stats)} total player records to BigQuery")
         load_df(combined_stats, "player_boxscores")

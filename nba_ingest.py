@@ -193,7 +193,7 @@ def build_optimized_date_range_games_mapping(start_date: str, end_date: str) -> 
 def scan_season_range(start_date: str, end_date: str, season_prefix: str, 
                      first_game_id: int, season_start: datetime.datetime) -> Dict[str, List[str]]:
     """
-    Scan a single season range efficiently by calculating min/max game IDs once.
+    Scan a single season range efficiently using fixed minimum game IDs.
     """
     start_dt = datetime.datetime.strptime(start_date, "%Y-%m-%d")
     end_dt = datetime.datetime.strptime(end_date, "%Y-%m-%d")
@@ -205,22 +205,25 @@ def scan_season_range(start_date: str, end_date: str, season_prefix: str,
         print(f"Range {start_date} to {end_date} is before season start")
         return date_to_games
     
-    # Calculate the absolute minimum and maximum game IDs for the range
-    effective_start = max(start_dt, season_start)
+    # Use fixed minimum game IDs for comprehensive coverage
+    if season_prefix == "002240":
+        # 2024-25 season: always start from 0022400000
+        start_id = 0
+    elif season_prefix == "002250":
+        # 2025-26 season: always start from 0022500000
+        start_id = 0
+    else:
+        # Fallback for other seasons
+        start_id = first_game_id
     
-    min_days_from_start = max(0, (effective_start - season_start).days)
+    # Calculate maximum game ID based on the end date
     max_days_from_start = max(0, (end_dt - season_start).days)
-    
-    # Calculate game ID bounds with conservative estimates
-    min_game_estimate = first_game_id + (min_days_from_start * 2)  # Conservative: 5 games/day minimum
-    max_game_estimate = first_game_id + (max_days_from_start * 15)  # Liberal: 15 games/day maximum
-    
-    # Add safety buffers
-    start_id = max(min_game_estimate - 50, first_game_id)
-    end_id = max_game_estimate + 50
+    max_game_estimate = start_id + (max_days_from_start * 15)  # Liberal: 15 games/day maximum
+    end_id = max_game_estimate + 100  # Add larger safety buffer
     
     print(f"  Scanning {season_prefix} range: game IDs {start_id} to {end_id}")
-    print(f"  Date range: {start_date} to {end_date} ({max_days_from_start - min_days_from_start + 1} days)")
+    print(f"  Date range: {start_date} to {end_date}")
+    print(f"  Fixed minimum: {season_prefix}{start_id:04d}")
     
     games_found = 0
     range_games_found = 0
@@ -337,27 +340,52 @@ def ingest_date_range_nba_live(start_date: str, end_date: str) -> None:
         
         # Get game data
         for game_id in game_ids:
-            try:
-                box = boxscore.BoxScore(game_id)
-                box_data = box.get_dict()
-                
-                if 'game' in box_data:
-                    all_games_data.append((box_data['game'], date_str))
+            retry_count = 0
+            max_retries = 3
+            
+            while retry_count < max_retries:
+                try:
+                    box = boxscore.BoxScore(game_id)
+                    box_data = box.get_dict()
                     
-                    # Get player stats for this game
-                    player_stats = get_player_stats_for_game(game_id, date_str)
-                    if not player_stats.empty:
-                        all_player_stats.append(player_stats)
-                        print(f"  {game_id}: {len(player_stats)} players")
-                
-                processed_games += 1
-                if processed_games % 10 == 0:
-                    print(f"  Progress: {processed_games}/{total_games} games processed")
-                
-                time.sleep(0.2)  # Small delay to be nice to the API
-                
-            except Exception as e:
-                print(f"  Error with game {game_id}: {e}")
+                    if 'game' in box_data:
+                        all_games_data.append((box_data['game'], date_str))
+                        
+                        # Get player stats for this game
+                        player_stats = get_player_stats_for_game(game_id, date_str)
+                        if not player_stats.empty:
+                            all_player_stats.append(player_stats)
+                            print(f"  ✓ {game_id}: {len(player_stats)} players")
+                        else:
+                            print(f"  ✓ {game_id}: game data only (no player stats)")
+                    else:
+                        print(f"  ⚠ {game_id}: no game data in response")
+                    
+                    break  # Success, exit retry loop
+                    
+                except Exception as e:
+                    retry_count += 1
+                    error_msg = str(e)
+                    
+                    if "Expecting value: line 1 column 1" in error_msg:
+                        if retry_count < max_retries:
+                            print(f"  🔄 {game_id}: Empty response, retrying ({retry_count}/{max_retries})")
+                            time.sleep(1.0 * retry_count)  # Exponential backoff
+                        else:
+                            print(f"  ❌ {game_id}: Failed after {max_retries} retries (empty response)")
+                    else:
+                        print(f"  ❌ {game_id}: {error_msg}")
+                        break  # Don't retry for other errors
+            
+            processed_games += 1
+            if processed_games % 10 == 0:
+                print(f"  Progress: {processed_games}/{total_games} games processed")
+            
+            # Adaptive delay based on success rate
+            if retry_count > 0:
+                time.sleep(0.5)  # Longer delay after errors
+            else:
+                time.sleep(0.2)  # Normal delay
     
     # Bulk process games
     if all_games_data:
@@ -432,91 +460,102 @@ def extract_games_from_game_data(games_data: List[Dict], target_date: str) -> pd
     return coerce_games_dtypes(df)
 
 def get_player_stats_for_game(game_id: str, date_str: str) -> pd.DataFrame:
-    """Get complete player statistics for a specific game"""
-    try:
-        box = boxscore.BoxScore(game_id)
-        box_data = box.get_dict()
-        
-        if 'game' not in box_data:
-            print(f"No game data found for {game_id}")
-            return pd.DataFrame(columns=[f.name for f in BOX_SCHEMA])
-        
-        game_info = box_data['game']
-        
-        # Use the date_str parameter consistently
-        year = int(date_str[:4])
-        month = int(date_str[5:7])
-        season = year if month >= 10 else year - 1
-        
-        players_data = []
-        
-        for team_type in ['homeTeam', 'awayTeam']:
-            if team_type not in game_info:
-                continue
-                
-            team = game_info[team_type]
-            team_id = safe_int(team.get('teamId'))
-            team_abbr = team.get('teamTricode')
+    """Get complete player statistics for a specific game with retry logic"""
+    max_retries = 2
+    retry_count = 0
+    
+    while retry_count < max_retries:
+        try:
+            box = boxscore.BoxScore(game_id)
+            box_data = box.get_dict()
             
-            players = team.get('players', [])
+            if 'game' not in box_data:
+                return pd.DataFrame(columns=[f.name for f in BOX_SCHEMA])
             
-            for player in players:
-                if player.get('status') != 'ACTIVE':
+            game_info = box_data['game']
+            
+            # Use the date_str parameter consistently
+            year = int(date_str[:4])
+            month = int(date_str[5:7])
+            season = year if month >= 10 else year - 1
+            
+            players_data = []
+            
+            for team_type in ['homeTeam', 'awayTeam']:
+                if team_type not in game_info:
                     continue
+                    
+                team = game_info[team_type]
+                team_id = safe_int(team.get('teamId'))
+                team_abbr = team.get('teamTricode')
                 
-                player_id = safe_int(player.get('personId'))
-                player_name = player.get('name')
-                jersey_num = player.get('jerseyNum')
-                position = player.get('position')
-                starter = player.get('starter') == '1'
+                players = team.get('players', [])
                 
-                stats = player.get('statistics', {})
-                
-                player_row = {
-                    "event_id": game_id,
-                    "date": date_str,  # Use the passed date_str consistently
-                    "season": season,
-                    "team_id": team_id,
-                    "team_abbr": team_abbr,
-                    "player_id": player_id,
-                    "player": player_name,
-                    "starter": starter,
-                    "minutes": parse_minutes(stats.get('minutes', 'PT00M00.00S')),
-                    "pts": safe_int(stats.get('points', 0)),
-                    "reb": safe_int(stats.get('reboundsTotal', 0)),
-                    "ast": safe_int(stats.get('assists', 0)),
-                    "stl": safe_int(stats.get('steals', 0)),
-                    "blk": safe_int(stats.get('blocks', 0)),
-                    "tov": safe_int(stats.get('turnovers', 0)),
-                    "fgm": safe_int(stats.get('fieldGoalsMade', 0)),
-                    "fga": safe_int(stats.get('fieldGoalsAttempted', 0)),
-                    "fg_pct": safe_float(stats.get('fieldGoalsPercentage', 0)),
-                    "fg3m": safe_int(stats.get('threePointersMade', 0)),
-                    "fg3a": safe_int(stats.get('threePointersAttempted', 0)),
-                    "fg3_pct": safe_float(stats.get('threePointersPercentage', 0)),
-                    "ftm": safe_int(stats.get('freeThrowsMade', 0)),
-                    "fta": safe_int(stats.get('freeThrowsAttempted', 0)),
-                    "ft_pct": safe_float(stats.get('freeThrowsPercentage', 0)),
-                    "oreb": safe_int(stats.get('reboundsOffensive', 0)),
-                    "dreb": safe_int(stats.get('reboundsDefensive', 0)),
-                    "pf": safe_int(stats.get('foulsPersonal', 0)),
-                    "plus_minus": safe_float(stats.get('plusMinusPoints', 0)),
-                    "position": position,
-                    "jersey_num": jersey_num
-                }
-                
-                players_data.append(player_row)
-        
-        if not players_data:
-            print(f"No player data found for game {game_id}")
-            return pd.DataFrame(columns=[f.name for f in BOX_SCHEMA])
-        
-        df = pd.DataFrame(players_data)
-        return coerce_box_dtypes(df)
-        
-    except Exception as e:
-        print(f"Error getting player stats for game {game_id}: {e}")
-        return pd.DataFrame(columns=[f.name for f in BOX_SCHEMA])
+                for player in players:
+                    if player.get('status') != 'ACTIVE':
+                        continue
+                    
+                    player_id = safe_int(player.get('personId'))
+                    player_name = player.get('name')
+                    jersey_num = player.get('jerseyNum')
+                    position = player.get('position')
+                    starter = player.get('starter') == '1'
+                    
+                    stats = player.get('statistics', {})
+                    
+                    player_row = {
+                        "event_id": game_id,
+                        "date": date_str,  # Use the passed date_str consistently
+                        "season": season,
+                        "team_id": team_id,
+                        "team_abbr": team_abbr,
+                        "player_id": player_id,
+                        "player": player_name,
+                        "starter": starter,
+                        "minutes": parse_minutes(stats.get('minutes', 'PT00M00.00S')),
+                        "pts": safe_int(stats.get('points', 0)),
+                        "reb": safe_int(stats.get('reboundsTotal', 0)),
+                        "ast": safe_int(stats.get('assists', 0)),
+                        "stl": safe_int(stats.get('steals', 0)),
+                        "blk": safe_int(stats.get('blocks', 0)),
+                        "tov": safe_int(stats.get('turnovers', 0)),
+                        "fgm": safe_int(stats.get('fieldGoalsMade', 0)),
+                        "fga": safe_int(stats.get('fieldGoalsAttempted', 0)),
+                        "fg_pct": safe_float(stats.get('fieldGoalsPercentage', 0)),
+                        "fg3m": safe_int(stats.get('threePointersMade', 0)),
+                        "fg3a": safe_int(stats.get('threePointersAttempted', 0)),
+                        "fg3_pct": safe_float(stats.get('threePointersPercentage', 0)),
+                        "ftm": safe_int(stats.get('freeThrowsMade', 0)),
+                        "fta": safe_int(stats.get('freeThrowsAttempted', 0)),
+                        "ft_pct": safe_float(stats.get('freeThrowsPercentage', 0)),
+                        "oreb": safe_int(stats.get('reboundsOffensive', 0)),
+                        "dreb": safe_int(stats.get('reboundsDefensive', 0)),
+                        "pf": safe_int(stats.get('foulsPersonal', 0)),
+                        "plus_minus": safe_float(stats.get('plusMinusPoints', 0)),
+                        "position": position,
+                        "jersey_num": jersey_num
+                    }
+                    
+                    players_data.append(player_row)
+            
+            if not players_data:
+                return pd.DataFrame(columns=[f.name for f in BOX_SCHEMA])
+            
+            df = pd.DataFrame(players_data)
+            return coerce_box_dtypes(df)
+            
+        except Exception as e:
+            retry_count += 1
+            error_msg = str(e)
+            
+            if "Expecting value: line 1 column 1" in error_msg and retry_count < max_retries:
+                time.sleep(0.5 * retry_count)  # Short delay before retry
+                continue
+            else:
+                # Don't log player stats errors here as they're handled in the main loop
+                return pd.DataFrame(columns=[f.name for f in BOX_SCHEMA])
+    
+    return pd.DataFrame(columns=[f.name for f in BOX_SCHEMA])
 
 def ingest_date_nba_live(date_str: str) -> None:
     """Ingest NBA data for a specific date using NBA Live API"""

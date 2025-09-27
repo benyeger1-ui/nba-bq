@@ -131,7 +131,7 @@ def normalize_game_date(game_date_str: str, target_date: str) -> str:
         except:
             return target_date
 
-def build_date_to_games_mapping(target_date: str, search_window: int = 30) -> Dict[str, List[str]]:
+def build_date_to_games_mapping(target_date: str, search_window: int = 150) -> Dict[str, List[str]]:
     """
     Build a mapping of dates to game IDs with precise date estimation.
     """
@@ -196,22 +196,10 @@ def build_date_to_games_mapping(target_date: str, search_window: int = 30) -> Di
     
     # Conservative approach: scan a smaller range more precisely
     if days_from_start == 0:  # Oct 22
-        start_id, end_id = 90, 105
-    elif days_from_start == 1:  # Oct 23  
-        start_id, end_id = 100, 115
-    elif days_from_start == 2:  # Oct 24
-        start_id, end_id = 110, 125
-    elif days_from_start == 3:  # Oct 25
-        start_id, end_id = 115, 135
-    elif days_from_start == 4:  # Oct 26
-        start_id, end_id = 125, 145
-    elif days_from_start == 5:  # Oct 27
-        start_id, end_id = 135, 155
-    elif days_from_start == 6:  # Oct 28
-        start_id, end_id = 105, 125  # More focused range for Oct 28
+        start_id, end_id = 30, 105
     else:
         # For later dates, use the original estimation but with smaller window
-        estimated_game_num = 90 + (days_from_start * 10)  # More conservative: 10 games/day
+        estimated_game_num = 30 + (days_from_start * 7)  # More conservative: 10 games/day
         start_id = max(estimated_game_num - search_window, 90)
         end_id = estimated_game_num + search_window
     
@@ -418,16 +406,17 @@ def parse_minutes(minutes_str: str) -> str:
         return "0:00"
 
 def get_games_for_date(target_date: str) -> pd.DataFrame:
-    """Get games for a specific date using improved date-based search"""
+    """Get games for a specific date with improved date handling"""
     print(f"Searching for games on {target_date}")
     
-    # Get game IDs for the target date
-    game_ids = get_games_for_date_direct(target_date)
+    # Build the date-to-games mapping
+    date_mapping = build_date_to_games_mapping(target_date)
     
-    if not game_ids:
+    if target_date not in date_mapping:
         print(f"No games found for {target_date}")
         return pd.DataFrame(columns=[f.name for f in GAMES_SCHEMA])
     
+    game_ids = date_mapping[target_date]
     print(f"Found {len(game_ids)} games for {target_date}: {game_ids}")
     
     # Get game data for each game ID

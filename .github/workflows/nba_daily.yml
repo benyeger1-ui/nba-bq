@@ -22,4 +22,4 @@ jobs:
           GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
           BQ_DATASET: ${{ secrets.BQ_DATASET }}
         run: |
-          python espn_ingest.py --mode daily
+          python nba_ingest.py --mode daily

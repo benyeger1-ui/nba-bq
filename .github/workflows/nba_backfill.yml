@@ -32,4 +32,4 @@ jobs:
           GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
           BQ_DATASET: ${{ secrets.BQ_DATASET }}
         run: |
-          python espn_ingest.py --mode backfill --start ${{ github.event.inputs.start }} --end ${{ github.event.inputs.end }}
+          python yahoo_nba_ingest.py --mode backfill --start ${{ github.event.inputs.start }} --end ${{ github.event.inputs.end }}

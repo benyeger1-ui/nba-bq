@@ -13,7 +13,6 @@ import pytz
 import pandas as pd
 from pandas.api.types import is_object_dtype
 
-# Import only the reliable NBA API endpoints
 from nba_api.live.nba.endpoints import scoreboard, boxscore
 
 from google.cloud import bigquery
@@ -33,7 +32,7 @@ ET_TZ = pytz.timezone('US/Eastern')
 UTC_TZ = pytz.timezone('UTC')
 
 # -----------------------------------
-# BigQuery schemas
+# BigQuery schemas (same as before)
 # -----------------------------------
 GAMES_SCHEMA = [
     bigquery.SchemaField("event_id", "STRING"),
@@ -85,75 +84,131 @@ BOX_SCHEMA = [
     bigquery.SchemaField("jersey_num", "STRING"),
 ]
 
-def get_games_for_date_proper(target_date: str) -> List[str]:
+def normalize_game_date(game_date_str: str, target_date: str) -> str:
     """
-    Get games for a specific date using reliable methods.
-    Falls back to targeted game ID search since stats API is unreliable.
+    Convert game date to Eastern Time date for consistency.
+    NBA games are scheduled in ET, so we want to group by ET date.
     """
-    print(f"Searching for games on {target_date}")
-    
-    # Method 1: Try live scoreboard first (most reliable for recent games)
     try:
-        print("Trying live scoreboard API...")
-        sb = scoreboard.ScoreBoard()
-        sb_data = sb.get_dict()
-        
-        game_ids = []
-        if 'scoreboard' in sb_data and 'games' in sb_data['scoreboard']:
-            games = sb_data['scoreboard']['games']
+        if not game_date_str:
+            return target_date
             
-            for game in games:
-                game_id = game.get('gameId')
-                game_date_utc = game.get('gameTimeUTC', '')
-                
-                if game_id and game_date_utc:
-                    # Convert UTC to ET and check if it matches target date
-                    try:
-                        game_dt = datetime.datetime.fromisoformat(game_date_utc.replace('Z', '+00:00'))
-                        et_dt = game_dt.astimezone(ET_TZ)
-                        et_date = et_dt.date().isoformat()
-                        
-                        if et_date == target_date:
-                            game_ids.append(game_id)
-                            teams = f"{game.get('awayTeam', {}).get('teamName', 'Unknown')} @ {game.get('homeTeam', {}).get('teamName', 'Unknown')}"
-                            print(f"  Found: {game_id} - {teams}")
-                    except Exception:
-                        continue
+        # Handle different date formats from NBA API
+        if 'T' in game_date_str:
+            # Full datetime format: "2024-10-28T23:30:00Z" or "2024-10-28T23:30:00.000Z"
+            clean_date_str = game_date_str.replace('Z', '+00:00')
+            
+            # Handle microseconds if present
+            if '.' in clean_date_str and len(clean_date_str.split('.')[1]) > 6:
+                # Truncate microseconds to 6 digits max
+                parts = clean_date_str.split('.')
+                microseconds = parts[1][:6] + parts[1][6:].replace('+00:00', '') + '+00:00'
+                clean_date_str = parts[0] + '.' + microseconds
+            
+            game_dt = datetime.datetime.fromisoformat(clean_date_str)
+            
+            # Ensure it's treated as UTC if no timezone info
+            if game_dt.tzinfo is None:
+                game_dt = UTC_TZ.localize(game_dt)
+        else:
+            # If it's just a date, assume it's already in ET
+            return game_date_str[:10]
         
-        if game_ids:
-            print(f"Found {len(game_ids)} games for {target_date} via live scoreboard")
-            return game_ids
+        # Convert to Eastern Time
+        et_dt = game_dt.astimezone(ET_TZ)
+        et_date = et_dt.date().isoformat()
+        
+        # Debug print to see conversion
+        print(f"    Date conversion: {game_date_str} -> {et_date}")
+        
+        return et_date
         
     except Exception as e:
-        print(f"Live scoreboard failed: {e}")
+        print(f"Error parsing game date {game_date_str}: {e}")
+        # Fallback: try to extract just the date part
+        try:
+            return game_date_str[:10]
+        except:
+            return target_date
+
+def build_date_to_games_mapping(target_date: str, search_window: int = 30) -> Dict[str, List[str]]:
+    """
+    Build a mapping of dates to game IDs with precise date estimation.
+    """
+    print(f"Building date-to-games mapping for {target_date}")
     
-    # Method 2: Smart game ID search for historical dates
-    print("Using targeted game ID search for historical date...")
+    date_to_games: Dict[str, List[str]] = {}
     
+    # Skip scoreboard API for historical dates (it only returns current/future games)
     target_dt = datetime.datetime.strptime(target_date, "%Y-%m-%d")
-    season_start = datetime.datetime(2024, 10, 22)  # 2024-25 season start
+    today = datetime.datetime.now()
+    
+    if target_dt.date() >= today.date():
+        # Only try scoreboard for today/future dates
+        try:
+            print(f"Trying scoreboard API for current/future date {target_date}")
+            sb = scoreboard.ScoreBoard()
+            sb_data = sb.get_dict()
+            
+            if 'scoreboard' in sb_data and 'games' in sb_data['scoreboard']:
+                games = sb_data['scoreboard']['games']
+                print(f"Scoreboard API returned {len(games)} games")
+                
+                for game in games:
+                    game_id = game.get('gameId')
+                    game_date_utc = game.get('gameTimeUTC', '')
+                    
+                    if game_id and game_date_utc:
+                        normalized_date = normalize_game_date(game_date_utc, target_date)
+                        
+                        if normalized_date not in date_to_games:
+                            date_to_games[normalized_date] = []
+                        date_to_games[normalized_date].append(game_id)
+                        
+                        print(f"  {game_id}: {game_date_utc} -> {normalized_date}")
+                
+                if target_date in date_to_games:
+                    print(f"✅ Found {len(date_to_games[target_date])} games via scoreboard API")
+                    return date_to_games
+            
+        except Exception as e:
+            print(f"Scoreboard API failed: {e}")
+    else:
+        print(f"Skipping scoreboard API for historical date {target_date}")
+    
+    # More precise game ID estimation for historical data
+    print("Using precise game ID scanning for historical data...")
+    
+    # NBA 2024-25 season start: October 22, 2024
+    season_start = datetime.datetime(2024, 10, 22)
     
     if target_dt < season_start:
-        print(f"Target date {target_date} is before season start")
-        return []
+        print(f"Target date {target_date} is before season start (Oct 22, 2024)")
+        return date_to_games
     
     days_from_start = (target_dt - season_start).days
     
-    # More precise estimation based on known patterns
-    # Oct 22 (opening night): games start around 90-95
-    # Roughly 10-12 games per day average
-    base_game_id = 90
-    games_per_day = 10
+    # More precise mapping based on known game IDs:
+    # Oct 22 (day 0): games around 90-100
+    # Oct 23 (day 1): games around 101-108
+    # Oct 24 (day 2): games around 109-119
+    # etc.
     
-    estimated_start = base_game_id + (days_from_start * games_per_day)
-    search_range = 25  # Search +/- 25 games around estimate
+    # Conservative approach: scan a smaller range more precisely
+    if days_from_start == 0:  # Oct 22
+        start_id, end_id = 30, 105
+    else:
+        # For later dates, use the original estimation but with smaller window
+        estimated_game_num = 30 + (days_from_start * 10)  # More conservative: 10 games/day
+        start_id = max(estimated_game_num - search_window, 90)
+        end_id = estimated_game_num + search_window
     
-    start_id = max(estimated_start - search_range, 90)
-    end_id = estimated_start + search_range
+    print(f"Target date: {target_date} ({days_from_start} days from season start)")
+    print(f"Scanning game IDs {start_id} to {end_id}")
     
-    print(f"Searching game IDs {start_id} to {end_id} for {target_date} ({days_from_start} days from season start)")
+    games_found = 0
+    target_games_found = 0
     
-    game_ids = []
     for game_num in range(start_id, end_id + 1):
         game_id = f"002240{game_num:04d}"
         
@@ -166,87 +221,53 @@ def get_games_for_date_proper(target_date: str) -> List[str]:
                 game_date_utc = game_info.get('gameTimeUTC', '')
                 
                 if game_date_utc:
-                    # Convert to ET date
-                    try:
-                        game_dt = datetime.datetime.fromisoformat(game_date_utc.replace('Z', '+00:00'))
-                        et_dt = game_dt.astimezone(ET_TZ)
-                        et_date = et_dt.date().isoformat()
-                        
-                        if et_date == target_date:
-                            game_ids.append(game_id)
-                            teams = f"{game_info.get('awayTeam', {}).get('teamName', 'Unknown')} @ {game_info.get('homeTeam', {}).get('teamName', 'Unknown')}"
-                            print(f"  Found: {game_id} - {teams}")
-                    except Exception:
-                        continue
+                    normalized_date = normalize_game_date(game_date_utc, target_date)
+                    
+                    if normalized_date not in date_to_games:
+                        date_to_games[normalized_date] = []
+                    date_to_games[normalized_date].append(game_id)
+                    games_found += 1
+                    
+                    # Count games for target date
+                    if normalized_date == target_date:
+                        target_games_found += 1
+                    
+                    teams = f"{game_info.get('awayTeam', {}).get('teamName', 'Unknown')} @ {game_info.get('homeTeam', {}).get('teamName', 'Unknown')}"
+                    date_marker = "🎯" if normalized_date == target_date else "  "
+                    print(f"{date_marker} {game_id}: {normalized_date} - {teams}")
         
-        except Exception:
-            continue  # Game doesn't exist, continue searching
-    
-    if game_ids:
-        print(f"Found {len(game_ids)} games for {target_date}")
-    else:
-        print(f"No games found for {target_date}")
-    
-    return game_ids
-
-def get_games_for_date(target_date: str) -> pd.DataFrame:
-    """Get games for a specific date using proper NBA API date search"""
-    print(f"Starting game search for {target_date}")
-    
-    # Get game IDs using proper date-based search
-    game_ids = get_games_for_date_proper(target_date)
-    
-    if not game_ids:
-        print(f"No games found for {target_date}")
-        return pd.DataFrame(columns=[f.name for f in GAMES_SCHEMA])
-    
-    print(f"Found {len(game_ids)} games for {target_date}: {game_ids}")
-    
-    # Get detailed game data using the live boxscore API
-    games_data = []
-    for game_id in game_ids:
-        try:
-            # Convert stats API game ID to live API format if needed
-            live_game_id = convert_to_live_game_id(game_id)
-            
-            print(f"Fetching details for game {live_game_id}")
-            box = boxscore.BoxScore(live_game_id)
-            box_data = box.get_dict()
-            
-            if 'game' in box_data:
-                games_data.append(box_data['game'])
-            else:
-                print(f"No game data found for {live_game_id}")
-                
         except Exception as e:
-            print(f"Error getting game data for {game_id}: {e}")
-            continue
+            continue  # Game doesn't exist
     
-    if games_data:
-        return extract_games_from_game_data(games_data, target_date)
+    print(f"\nScan complete. Found {games_found} total games.")
+    print(f"Games found for target date {target_date}: {target_games_found}")
+    
+    # Show only dates close to target
+    sorted_dates = sorted(date_to_games.keys())
+    if sorted_dates:
+        print(f"\nDates with games found:")
+        for date in sorted_dates:
+            days_diff = abs((datetime.datetime.strptime(date, "%Y-%m-%d") - target_dt).days)
+            if days_diff <= 3:  # Only show dates within 3 days
+                marker = "🎯" if date == target_date else "  "
+                print(f"{marker} {date}: {len(date_to_games[date])} games (±{days_diff} days)")
+    
+    if target_date in date_to_games:
+        print(f"\n✅ Found {len(date_to_games[target_date])} games for {target_date}")
     else:
-        return pd.DataFrame(columns=[f.name for f in GAMES_SCHEMA])
-
-def convert_to_live_game_id(stats_game_id: str) -> str:
-    """
-    Convert stats API game ID format to live API format if needed.
-    Stats API: "0022400112" 
-    Live API:  "0022400112" (usually the same, but this function handles edge cases)
-    """
-    # Usually they're the same format, but this function can handle conversions if needed
-    if len(stats_game_id) == 10 and stats_game_id.startswith('002'):
-        return stats_game_id
+        print(f"\n❌ No games found for {target_date}")
     
-    # Add any conversion logic here if formats differ
-    return stats_game_id
+    return date_to_games
 
 def extract_games_from_game_data(games_data: List[Dict], target_date: str) -> pd.DataFrame:
-    """Extract game information from box score game data"""
+    """Extract game information from box score game data with proper date handling"""
     games_rows = []
     
     for game in games_data:
-        year = int(target_date[:4])
-        month = int(target_date[5:7])
+        # Use the target date for consistency (since we've already filtered by date)
+        date_for_season = target_date
+        year = int(date_for_season[:4])
+        month = int(date_for_season[5:7])
         season = year if month >= 10 else year - 1
         
         home_team = game.get('homeTeam', {})
@@ -256,7 +277,7 @@ def extract_games_from_game_data(games_data: List[Dict], target_date: str) -> pd
         games_rows.append({
             "event_id": game.get('gameId'),
             "game_uid": game.get('gameCode'),
-            "date": target_date,
+            "date": target_date,  # Use the target date consistently
             "season": season,
             "status_type": game.get('gameStatusText', 'Unknown'),
             "home_id": safe_int(home_team.get('teamId')),
@@ -276,7 +297,7 @@ def extract_games_from_game_data(games_data: List[Dict], target_date: str) -> pd
     df = pd.DataFrame(games_rows)
     return coerce_games_dtypes(df)
 
-# All the utility functions remain the same
+# Keep all the existing utility functions unchanged
 def ensure_dataset() -> None:
     ds_id = f"{PROJECT_ID}.{DATASET}"
     try:
@@ -384,6 +405,37 @@ def parse_minutes(minutes_str: str) -> str:
     except Exception:
         return "0:00"
 
+def get_games_for_date(target_date: str) -> pd.DataFrame:
+    """Get games for a specific date with improved date handling"""
+    print(f"Searching for games on {target_date}")
+    
+    # Build the date-to-games mapping
+    date_mapping = build_date_to_games_mapping(target_date)
+    
+    if target_date not in date_mapping:
+        print(f"No games found for {target_date}")
+        return pd.DataFrame(columns=[f.name for f in GAMES_SCHEMA])
+    
+    game_ids = date_mapping[target_date]
+    print(f"Found {len(game_ids)} games for {target_date}: {game_ids}")
+    
+    # Get game data for each game ID
+    games_data = []
+    for game_id in game_ids:
+        try:
+            box = boxscore.BoxScore(game_id)
+            box_data = box.get_dict()
+            
+            if 'game' in box_data:
+                games_data.append(box_data['game'])
+        except Exception as e:
+            print(f"Error getting game data for {game_id}: {e}")
+    
+    if games_data:
+        return extract_games_from_game_data(games_data, target_date)
+    else:
+        return pd.DataFrame(columns=[f.name for f in GAMES_SCHEMA])
+
 def get_player_stats_for_game(game_id: str, date_str: str) -> pd.DataFrame:
     """Get complete player statistics for a specific game"""
     try:
@@ -396,6 +448,7 @@ def get_player_stats_for_game(game_id: str, date_str: str) -> pd.DataFrame:
         
         game_info = box_data['game']
         
+        # Use the date_str parameter consistently
         year = int(date_str[:4])
         month = int(date_str[5:7])
         season = year if month >= 10 else year - 1
@@ -426,7 +479,7 @@ def get_player_stats_for_game(game_id: str, date_str: str) -> pd.DataFrame:
                 
                 player_row = {
                     "event_id": game_id,
-                    "date": date_str,
+                    "date": date_str,  # Use the passed date_str consistently
                     "season": season,
                     "team_id": team_id,
                     "team_abbr": team_abbr,
@@ -471,7 +524,7 @@ def get_player_stats_for_game(game_id: str, date_str: str) -> pd.DataFrame:
         return pd.DataFrame(columns=[f.name for f in BOX_SCHEMA])
 
 def ingest_date_nba_live(date_str: str) -> None:
-    """Ingest NBA data for a specific date using proper date-based NBA API search"""
+    """Ingest NBA data for a specific date using NBA Live API"""
     ensure_tables()
     
     print(f"Starting NBA data ingestion for {date_str}")
@@ -513,7 +566,7 @@ def ingest_date_nba_live(date_str: str) -> None:
     print(f"Ingestion complete for {date_str}")
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Ingest NBA data using proper NBA API date search")
+    parser = argparse.ArgumentParser(description="Ingest NBA data using NBA Live API")
     parser.add_argument("--mode", choices=["daily", "backfill"], default="daily")
     parser.add_argument("--start", help="YYYY-MM-DD start date for backfill")
     parser.add_argument("--end", help="YYYY-MM-DD end date for backfill")

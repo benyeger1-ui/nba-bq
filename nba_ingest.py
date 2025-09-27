@@ -275,7 +275,7 @@ def build_date_to_games_mapping(target_date: str, search_window: int = 150) -> D
 def build_date_range_games_mapping(start_date: str, end_date: str, search_window: int = 150) -> Dict[str, List[str]]:
     """
     Build a mapping of dates to game IDs for a date range efficiently.
-    Scans once and collects all games for the entire range.
+    Handles cross-season ranges by splitting into appropriate chunks.
     """
     print(f"Building date-to-games mapping for range {start_date} to {end_date}")
     
@@ -284,33 +284,77 @@ def build_date_range_games_mapping(start_date: str, end_date: str, search_window
     start_dt = datetime.datetime.strptime(start_date, "%Y-%m-%d")
     end_dt = datetime.datetime.strptime(end_date, "%Y-%m-%d")
     
-    # Determine season and game ID format based on date range
-    if start_dt >= datetime.datetime(2025, 10, 1):
-        # 2025-26 season
-        print("Using 2025-26 season format (002250xxxx)")
-        season_start = datetime.datetime(2025, 10, 21)
-        season_prefix = "002250"
-        first_game_id = 0
+    # Check if range crosses season boundary (October 1, 2025)
+    season_boundary = datetime.datetime(2025, 10, 1)
+    
+    if start_dt < season_boundary and end_dt >= season_boundary:
+        # Range crosses seasons - split into two parts
+        print("Date range crosses season boundary, splitting...")
+        
+        # Part 1: 2024-25 season (start_date to Sept 30, 2025)
+        part1_end = "2025-09-30"
+        print(f"Processing 2024-25 season: {start_date} to {part1_end}")
+        mapping1 = build_single_season_games_mapping(start_date, part1_end, "002240", 61, datetime.datetime(2024, 10, 22))
+        date_to_games.update(mapping1)
+        
+        # Part 2: 2025-26 season (Oct 1, 2025 to end_date)
+        part2_start = "2025-10-01"
+        print(f"Processing 2025-26 season: {part2_start} to {end_date}")
+        mapping2 = build_single_season_games_mapping(part2_start, end_date, "002250", 0, datetime.datetime(2025, 10, 21))
+        date_to_games.update(mapping2)
+        
     else:
-        # 2024-25 season
-        print("Using 2024-25 season format (002240xxxx)")
-        season_start = datetime.datetime(2024, 10, 22)
-        season_prefix = "002240"
-        first_game_id = 61
+        # Range is within a single season
+        if start_dt >= season_boundary:
+            # 2025-26 season
+            print("Using 2025-26 season format (002250xxxx)")
+            mapping = build_single_season_games_mapping(start_date, end_date, "002250", 0, datetime.datetime(2025, 10, 21))
+        else:
+            # 2024-25 season
+            print("Using 2024-25 season format (002240xxxx)")
+            mapping = build_single_season_games_mapping(start_date, end_date, "002240", 61, datetime.datetime(2024, 10, 22))
+        
+        date_to_games.update(mapping)
+    
+    print(f"\nRange scan complete. Found {sum(len(games) for games in date_to_games.values())} total games across {len(date_to_games)} dates")
+    
+    # Show summary by date
+    for date in sorted(date_to_games.keys()):
+        print(f"  {date}: {len(date_to_games[date])} games")
+    
+    return date_to_games
+
+def build_single_season_games_mapping(start_date: str, end_date: str, season_prefix: str, first_game_id: int, season_start: datetime.datetime) -> Dict[str, List[str]]:
+    """
+    Build games mapping for a single season range.
+    """
+    start_dt = datetime.datetime.strptime(start_date, "%Y-%m-%d")
+    end_dt = datetime.datetime.strptime(end_date, "%Y-%m-%d")
+    
+    date_to_games: Dict[str, List[str]] = {}
+    
+    # Skip if before season start
+    if end_dt < season_start:
+        print(f"Date range ends before season start")
+        return date_to_games
+    
+    # Adjust start date if before season start
+    effective_start = max(start_dt, season_start)
     
     # Calculate search range based on the entire date range
-    start_days = max(0, (start_dt - season_start).days)
+    start_days = max(0, (effective_start - season_start).days)
     end_days = max(0, (end_dt - season_start).days)
     
     # Estimate game ID range for the entire period
-    start_game_estimate = first_game_id + (start_days * 7)
+    start_game_estimate = first_game_id + (start_days * 7)  # 7 games per day average
     end_game_estimate = first_game_id + (end_days * 7)
     
     # Add buffer for safety
-    start_id = max(start_game_estimate - search_window, first_game_id)
-    end_id = end_game_estimate + search_window
+    buffer = 50
+    start_id = max(start_game_estimate - buffer, first_game_id)
+    end_id = end_game_estimate + buffer
     
-    print(f"Scanning game IDs {start_id} to {end_id} for date range")
+    print(f"Scanning game IDs {start_id} to {end_id} with prefix {season_prefix}")
     print(f"Expected range covers {end_days - start_days + 1} days")
     
     games_found = 0
@@ -343,12 +387,7 @@ def build_date_range_games_mapping(start_date: str, end_date: str, search_window
         except Exception:
             continue
     
-    print(f"\nRange scan complete. Found {games_found} total games across {len(date_to_games)} dates")
-    
-    # Show summary by date
-    for date in sorted(date_to_games.keys()):
-        print(f"  {date}: {len(date_to_games[date])} games")
-    
+    print(f"Found {games_found} games for this season range")
     return date_to_games
 
 def ingest_date_range_nba_live(start_date: str, end_date: str) -> None:
@@ -694,6 +733,22 @@ def safe_str(x: Any) -> Optional[str]:
         return str(x) if x is not None and x != "" else None
     except Exception:
         return None
+
+def parse_minutes(minutes_str: str) -> str:
+    """Convert NBA API time format PT32M33.00S to readable format"""
+    try:
+        if not minutes_str or minutes_str == "PT00M00.00S":
+            return "0:00"
+        
+        clean_str = minutes_str.replace("PT", "").replace("S", "")
+        if "M" in clean_str:
+            parts = clean_str.split("M")
+            minutes = int(parts[0])
+            seconds = int(float(parts[1])) if len(parts) > 1 and parts[1] else 0
+            return f"{minutes}:{seconds:02d}"
+        return "0:00"
+    except Exception:
+        return "0:00"
 
 def get_games_for_date(target_date: str) -> pd.DataFrame:
     """Get games for a specific date with improved date handling"""

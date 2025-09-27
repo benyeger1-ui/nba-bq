@@ -131,7 +131,160 @@ def normalize_game_date(game_date_str: str, target_date: str) -> str:
         except:
             return target_date
 
-def build_date_to_games_mapping(target_date: str, search_window: int = 150) -> Dict[str, List[str]]:
+def build_date_range_games_mapping(start_date: str, end_date: str, search_window: int = 150) -> Dict[str, List[str]]:
+    """
+    Build a mapping of dates to game IDs for a date range efficiently.
+    Scans once and collects all games for the entire range.
+    """
+    print(f"Building date-to-games mapping for range {start_date} to {end_date}")
+    
+    date_to_games: Dict[str, List[str]] = {}
+    
+    start_dt = datetime.datetime.strptime(start_date, "%Y-%m-%d")
+    end_dt = datetime.datetime.strptime(end_date, "%Y-%m-%d")
+    
+    # Determine season and game ID format based on date range
+    if start_dt >= datetime.datetime(2025, 10, 1):
+        # 2025-26 season
+        print("Using 2025-26 season format (002250xxxx)")
+        season_start = datetime.datetime(2025, 10, 21)
+        season_prefix = "002250"
+        first_game_id = 0
+    else:
+        # 2024-25 season
+        print("Using 2024-25 season format (002240xxxx)")
+        season_start = datetime.datetime(2024, 10, 22)
+        season_prefix = "002240"
+        first_game_id = 61
+    
+    # Calculate search range based on the entire date range
+    start_days = max(0, (start_dt - season_start).days)
+    end_days = max(0, (end_dt - season_start).days)
+    
+    # Estimate game ID range for the entire period
+    start_game_estimate = first_game_id + (start_days * 7)
+    end_game_estimate = first_game_id + (end_days * 7)
+    
+    # Add buffer for safety
+    start_id = max(start_game_estimate - search_window, first_game_id)
+    end_id = end_game_estimate + search_window
+    
+    print(f"Scanning game IDs {start_id} to {end_id} for date range")
+    print(f"Expected range covers {end_days - start_days + 1} days")
+    
+    games_found = 0
+    
+    for game_num in range(start_id, end_id + 1):
+        game_id = f"{season_prefix}{game_num:04d}"
+        
+        try:
+            box = boxscore.BoxScore(game_id)
+            box_data = box.get_dict()
+            
+            if 'game' in box_data:
+                game_info = box_data['game']
+                game_date_utc = game_info.get('gameTimeUTC', '')
+                
+                if game_date_utc:
+                    normalized_date = normalize_game_date(game_date_utc, start_date)
+                    
+                    # Only include games within our target range
+                    normalized_dt = datetime.datetime.strptime(normalized_date, "%Y-%m-%d")
+                    if start_dt <= normalized_dt <= end_dt:
+                        if normalized_date not in date_to_games:
+                            date_to_games[normalized_date] = []
+                        date_to_games[normalized_date].append(game_id)
+                        games_found += 1
+                        
+                        teams = f"{game_info.get('awayTeam', {}).get('teamName', 'Unknown')} @ {game_info.get('homeTeam', {}).get('teamName', 'Unknown')}"
+                        print(f"✓ {game_id}: {normalized_date} - {teams}")
+        
+        except Exception:
+            continue
+    
+    print(f"\nRange scan complete. Found {games_found} total games across {len(date_to_games)} dates")
+    
+    # Show summary by date
+    for date in sorted(date_to_games.keys()):
+        print(f"  {date}: {len(date_to_games[date])} games")
+    
+    return date_to_games
+
+def ingest_date_range_nba_live(start_date: str, end_date: str) -> None:
+    """
+    Efficiently ingest NBA data for a date range by scanning once and bulk inserting.
+    """
+    ensure_tables()
+    
+    print(f"Starting NBA data ingestion for range {start_date} to {end_date}")
+    
+    # Get all games for the entire range at once
+    date_mapping = build_date_range_games_mapping(start_date, end_date)
+    
+    if not date_mapping:
+        print(f"No games found for date range {start_date} to {end_date}")
+        return
+    
+    all_games_data = []
+    all_player_stats = []
+    
+    # Process each date's games
+    for date_str, game_ids in date_mapping.items():
+        print(f"\nProcessing {len(game_ids)} games for {date_str}")
+        
+        # Get game data
+        for game_id in game_ids:
+            try:
+                box = boxscore.BoxScore(game_id)
+                box_data = box.get_dict()
+                
+                if 'game' in box_data:
+                    all_games_data.append((box_data['game'], date_str))
+                    
+                    # Get player stats for this game
+                    player_stats = get_player_stats_for_game(game_id, date_str)
+                    if not player_stats.empty:
+                        all_player_stats.append(player_stats)
+                        print(f"  {game_id}: {len(player_stats)} players")
+                
+                time.sleep(0.2)  # Small delay to be nice to the API
+                
+            except Exception as e:
+                print(f"  Error with game {game_id}: {e}")
+    
+    # Bulk process games
+    if all_games_data:
+        print(f"\nProcessing {len(all_games_data)} total games for bulk insert")
+        
+        # Group by date and create DataFrames
+        games_by_date = {}
+        for game_data, date_str in all_games_data:
+            if date_str not in games_by_date:
+                games_by_date[date_str] = []
+            games_by_date[date_str].append(game_data)
+        
+        # Create and insert games DataFrame
+        all_games_rows = []
+        for date_str, games_data in games_by_date.items():
+            date_df = extract_games_from_game_data(games_data, date_str)
+            if not date_df.empty:
+                all_games_rows.append(date_df)
+        
+        if all_games_rows:
+            combined_games = pd.concat(all_games_rows, ignore_index=True)
+            load_df(combined_games, "games_daily")
+            print(f"✅ Bulk loaded {len(combined_games)} games to BigQuery")
+    
+    # Bulk process player stats
+    if all_player_stats:
+        print(f"Processing {len(all_player_stats)} player stat sets for bulk insert")
+        combined_stats = pd.concat(all_player_stats, ignore_index=True)
+        load_df(combined_stats, "player_boxscores")
+        print(f"✅ Bulk loaded {len(combined_stats)} player records to BigQuery")
+    
+    print(f"\n🎉 Bulk ingestion complete for {start_date} to {end_date}")
+    print(f"   Games: {len(all_games_data)} across {len(date_mapping)} dates")
+    print(f"   Players: {len(combined_stats) if all_player_stats else 0} total records")
     """
     Build a mapping of dates to game IDs with precise date estimation.
     Updated to handle season transitions automatically.

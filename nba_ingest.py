@@ -188,38 +188,46 @@ def parse_minutes(minutes_str: str) -> str:
         return "0:00"
 
 def get_game_ids_for_date(target_date: str) -> List[str]:
-    """Get game IDs for a specific date using NBA Live API"""
+    """Get game IDs for a specific date using sequential NBA Live API game IDs"""
     try:
-        # The NBA Live API scoreboard typically shows current/recent games
-        # For historical dates, we need to use estimated game IDs
-        
-        # Parse the date
+        # Parse the target date
         date_obj = datetime.datetime.strptime(target_date, "%Y-%m-%d")
         
-        # NBA game ID format for 2024-25 season: 0022400XXX
-        # where XXX is the game number (starting around 90 for regular season)
+        # Known reference points from testing:
+        # 0022400090 = 2024-10-26
+        # 0022400091 = 2024-10-27
+        # 0022400092 = 2024-10-27  
+        # 0022400093 = 2024-10-27
+        # 0022400094 = 2024-10-27
         
-        # Estimate game IDs based on date
-        # Season started around Oct 15, 2024
-        season_start = datetime.datetime(2024, 10, 15)
+        reference_date = datetime.datetime(2024, 10, 26)
+        reference_game_id = 90
         
-        if date_obj >= season_start:
-            days_since_start = (date_obj - season_start).days
-            # Rough estimate: 12-15 games per day during season
-            estimated_game_start = 90 + (days_since_start * 12)
-            
-            # Generate potential game IDs for that day
-            game_ids = []
-            for i in range(15):  # Try 15 potential games for the day
-                game_num = estimated_game_start + i
-                game_id = f"002240{game_num:04d}"
-                game_ids.append(game_id)
-            
-            return game_ids
-        else:
-            # Pre-season or other dates
-            return []
-            
+        # Calculate days difference
+        days_diff = (date_obj - reference_date).days
+        
+        # Estimate starting game ID based on average games per day
+        # NBA typically has 10-15 games per day during regular season
+        avg_games_per_day = 12
+        estimated_start = reference_game_id + (days_diff * avg_games_per_day)
+        
+        # For October 31, 2024 (5 days after Oct 26):
+        # Estimated start: 90 + (5 * 12) = 150
+        # But let's try a wider range around this estimate
+        
+        game_ids = []
+        
+        # Try a range of 30 game IDs around our estimate
+        start_range = max(estimated_start - 10, 90)  # Don't go below known working IDs
+        end_range = estimated_start + 20
+        
+        for game_num in range(start_range, end_range):
+            game_id = f"002240{game_num:04d}"
+            game_ids.append(game_id)
+        
+        print(f"Trying game IDs {start_range} to {end_range-1} for {target_date}")
+        return game_ids
+        
     except Exception as e:
         print(f"Error generating game IDs for {target_date}: {e}")
         return []
@@ -228,33 +236,14 @@ def get_games_for_date(target_date: str) -> pd.DataFrame:
     """Get games for a specific date"""
     print(f"Fetching games for {target_date}")
     
-    # Try current scoreboard first
-    try:
-        sb = scoreboard.ScoreBoard()
-        scoreboard_data = sb.get_dict()
-        
-        if 'scoreboard' in scoreboard_data:
-            games_list = scoreboard_data['scoreboard'].get('games', [])
-            
-            # Filter games by date
-            date_games = []
-            for game in games_list:
-                game_date = game.get('gameTimeUTC', '')[:10]  # Get YYYY-MM-DD part
-                if game_date == target_date:
-                    date_games.append(game)
-            
-            if date_games:
-                print(f"Found {len(date_games)} games in current scoreboard")
-                return extract_games_from_scoreboard(date_games, target_date)
-    
-    except Exception as e:
-        print(f"Error getting current scoreboard: {e}")
-    
-    # If no games in current scoreboard, try estimated game IDs
-    print("Trying estimated game IDs for historical date...")
+    # For historical dates, go directly to game ID estimation
+    # since we know NBA Live scoreboard only shows current games
+    print("Searching for historical games using game ID estimation...")
     game_ids = get_game_ids_for_date(target_date)
     
     games_data = []
+    successful_ids = []
+    
     for game_id in game_ids:
         try:
             box = boxscore.BoxScore(game_id)
@@ -266,16 +255,26 @@ def get_games_for_date(target_date: str) -> pd.DataFrame:
                 
                 if game_date == target_date:
                     games_data.append(game_info)
-                    print(f"Found game {game_id} on {target_date}")
+                    successful_ids.append(game_id)
+                    print(f"Found game {game_id} on {target_date}: {game_info.get('awayTeam', {}).get('teamName', 'Unknown')} @ {game_info.get('homeTeam', {}).get('teamName', 'Unknown')}")
+                elif game_date:
+                    # Game exists but different date - this helps us calibrate
+                    print(f"Game {game_id} is on {game_date} (not {target_date})")
         
         except Exception:
-            # Game ID doesn't exist, continue
+            # Game ID doesn't exist, continue silently
             continue
     
     if games_data:
+        print(f"Successfully found {len(games_data)} games for {target_date}")
+        print(f"Game IDs: {successful_ids}")
         return extract_games_from_game_data(games_data, target_date)
     else:
         print(f"No games found for {target_date}")
+        print("This could mean:")
+        print("1. No NBA games were scheduled on this date")
+        print("2. The game ID estimation needs adjustment")
+        print("3. The date is outside the current NBA season")
         return pd.DataFrame(columns=[f.name for f in GAMES_SCHEMA])
 
 def extract_games_from_scoreboard(games_list: List[Dict], date_str: str) -> pd.DataFrame:

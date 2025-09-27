@@ -25,9 +25,8 @@ SA_INFO    = json.loads(os.environ["GCP_SA_KEY"])
 CREDS      = service_account.Credentials.from_service_account_info(SA_INFO)
 BQ         = bigquery.Client(project=PROJECT_ID, credentials=CREDS)
 
-# ESPN API endpoints
+# ESPN API endpoints - let's try the most reliable ones
 ESPN_SCOREBOARD = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard"
-ESPN_SUMMARY = "https://site.web.api.espn.com/apis/site/v2/sports/basketball/nba/summary"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
@@ -51,7 +50,7 @@ def http_get_json(url: str, params: Optional[Dict[str, Any]] = None, max_retries
     raise last_err if last_err else RuntimeError("request failed")
 
 # -----------------------------------
-# BigQuery schemas
+# BigQuery schemas (same as before)
 # -----------------------------------
 GAMES_SCHEMA = [
     bigquery.SchemaField("event_id", "STRING"),
@@ -169,11 +168,182 @@ def safe_int(x: Any) -> Optional[int]:
     except Exception:
         return None
 
-def safe_float(x: Any) -> Optional[float]:
-    try:
-        return float(x) if x is not None and x != "" else None
-    except Exception:
-        return None
+def fetch_boxscore_data(event_id: str) -> Dict[str, Any]:
+    """Try multiple ESPN endpoints to get detailed box score data"""
+    
+    endpoints = [
+        f"https://site.web.api.espn.com/apis/site/v2/sports/basketball/nba/boxscore?event={event_id}",
+        f"https://site.api.espn.com/apis/site/v2/sports/basketball/nba/summary?event={event_id}",
+        f"https://sports.core.api.espn.com/v2/sports/basketball/leagues/nba/events/{event_id}",
+    ]
+    
+    for url in endpoints:
+        try:
+            print(f"  Trying: {url}")
+            response = requests.get(url, headers=HEADERS, timeout=15)
+            if response.status_code == 200:
+                data = response.json()
+                print(f"  Success! Got data with keys: {list(data.keys())}")
+                return data
+            else:
+                print(f"  Failed with status: {response.status_code}")
+        except Exception as e:
+            print(f"  Error: {e}")
+            continue
+    
+    return {}
+
+def extract_team_statistics(team_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract team-level statistics from ESPN competitor data"""
+    stats_dict = {}
+    
+    # ESPN provides statistics as a list of dictionaries
+    statistics = team_data.get("statistics", [])
+    for stat in statistics:
+        name = stat.get("name", "").lower()
+        abbr = stat.get("abbreviation", "").lower()
+        value = stat.get("displayValue", "")
+        
+        # Map common field names
+        if name in ["fieldgoalsmade", "fgm"] or abbr == "fgm":
+            stats_dict["fgm"] = safe_int(value)
+        elif name in ["fieldgoalsattempted", "fga"] or abbr == "fga":
+            stats_dict["fga"] = safe_int(value)
+        elif name in ["freethrowsmade", "ftm"] or abbr == "ftm":
+            stats_dict["ftm"] = safe_int(value)
+        elif name in ["freethrowsattempted", "fta"] or abbr == "fta":
+            stats_dict["fta"] = safe_int(value)
+        elif name in ["threepointfieldgoalsmade", "3pm"] or abbr in ["3pm", "3p"]:
+            stats_dict["fg3m"] = safe_int(value)
+        elif name in ["threepointfieldgoalsattempted", "3pa"] or abbr == "3pa":
+            stats_dict["fg3a"] = safe_int(value)
+        elif name == "rebounds" or abbr == "reb":
+            stats_dict["reb"] = safe_int(value)
+        elif name == "assists" or abbr == "ast":
+            stats_dict["ast"] = safe_int(value)
+    
+    return stats_dict
+
+def extract_player_stats_from_leaders(event_data: Dict[str, Any], event_id: str, date_str: str) -> pd.DataFrame:
+    """Extract player statistics from ESPN's leaders data in scoreboard"""
+    players_list = []
+    
+    # Calculate season
+    year = int(date_str[:4])
+    month = int(date_str[5:7])
+    season = year if month >= 10 else year - 1
+    
+    # Look for the event in the events array
+    events = event_data.get("events", [])
+    target_event = None
+    
+    for event in events:
+        if event.get("id") == event_id:
+            target_event = event
+            break
+    
+    if not target_event:
+        print(f"  Could not find event {event_id} in response")
+        return pd.DataFrame(columns=[f.name for f in BOX_SCHEMA])
+    
+    competitions = target_event.get("competitions", [])
+    if not competitions:
+        print(f"  No competitions found for event {event_id}")
+        return pd.DataFrame(columns=[f.name for f in BOX_SCHEMA])
+    
+    comp = competitions[0]
+    competitors = comp.get("competitors", [])
+    
+    print(f"  Found {len(competitors)} teams")
+    
+    for competitor in competitors:
+        team_info = competitor.get("team", {})
+        team_id = safe_int(team_info.get("id"))
+        team_abbr = team_info.get("abbreviation")
+        
+        print(f"  Processing team: {team_abbr} (ID: {team_id})")
+        
+        # Extract team statistics for context
+        team_stats = extract_team_statistics(competitor)
+        
+        # Get leaders (top performers by category)
+        leaders = competitor.get("leaders", [])
+        print(f"    Found {len(leaders)} leader categories")
+        
+        # Track players we've seen to avoid duplicates
+        seen_players = {}
+        
+        for leader_category in leaders:
+            category_name = leader_category.get("name", "")
+            category_leaders = leader_category.get("leaders", [])
+            
+            print(f"    Category '{category_name}': {len(category_leaders)} leaders")
+            
+            for leader in category_leaders:
+                athlete = leader.get("athlete", {})
+                player_id = safe_int(athlete.get("id"))
+                player_name = athlete.get("displayName")
+                
+                if not player_id:
+                    continue
+                
+                # If we haven't seen this player, create a new record
+                if player_id not in seen_players:
+                    seen_players[player_id] = {
+                        "event_id": event_id,
+                        "date": date_str,
+                        "season": season,
+                        "team_id": team_id,
+                        "team_abbr": team_abbr,
+                        "player_id": player_id,
+                        "player": player_name,
+                        "starter": None,  # Not available in leaders data
+                        "minutes": None,  # Not available in leaders data
+                        "pts": None, "reb": None, "ast": None, "stl": None, "blk": None, "tov": None,
+                        "fgm": None, "fga": None, "fg3m": None, "fg3a": None, "ftm": None, "fta": None,
+                        "oreb": None, "dreb": None, "pf": None
+                    }
+                
+                # Update the stat for this category
+                stat_value = safe_int(leader.get("value"))
+                display_value = leader.get("displayValue", "")
+                
+                if category_name == "points":
+                    seen_players[player_id]["pts"] = stat_value
+                elif category_name == "rebounds":
+                    seen_players[player_id]["reb"] = stat_value
+                elif category_name == "assists":
+                    seen_players[player_id]["ast"] = stat_value
+                elif category_name == "rating":
+                    # The rating often contains multiple stats in displayValue
+                    # Example: "25 PTS, 9 REB, 7 AST, 5 STL, 5 BLK"
+                    if "PTS" in display_value:
+                        pts_match = display_value.split("PTS")[0].strip().split()[-1]
+                        seen_players[player_id]["pts"] = safe_int(pts_match)
+                    if "REB" in display_value:
+                        reb_match = display_value.split("REB")[0].split(",")[-1].strip().split()[-1]
+                        seen_players[player_id]["reb"] = safe_int(reb_match)
+                    if "AST" in display_value:
+                        ast_match = display_value.split("AST")[0].split(",")[-1].strip().split()[-1]
+                        seen_players[player_id]["ast"] = safe_int(ast_match)
+                    if "STL" in display_value:
+                        stl_match = display_value.split("STL")[0].split(",")[-1].strip().split()[-1]
+                        seen_players[player_id]["stl"] = safe_int(stl_match)
+                    if "BLK" in display_value:
+                        blk_match = display_value.split("BLK")[0].split(",")[-1].strip().split()[-1]
+                        seen_players[player_id]["blk"] = safe_int(blk_match)
+        
+        # Add all players from this team
+        players_list.extend(seen_players.values())
+        print(f"    Added {len(seen_players)} players from {team_abbr}")
+    
+    if not players_list:
+        print(f"  No player stats extracted for event {event_id}")
+        return pd.DataFrame(columns=[f.name for f in BOX_SCHEMA])
+    
+    print(f"  Total players extracted: {len(players_list)}")
+    df = pd.DataFrame(players_list)
+    return coerce_box_dtypes(df)
 
 def extract_games_from_scoreboard(scoreboard_data: Dict[str, Any], date_str: str) -> pd.DataFrame:
     """Extract game information from ESPN scoreboard"""
@@ -241,172 +411,6 @@ def extract_games_from_scoreboard(scoreboard_data: Dict[str, Any], date_str: str
     df = pd.DataFrame(games_list)
     return coerce_games_dtypes(df)
 
-def extract_player_stats_from_scoreboard(scoreboard_data: Dict[str, Any], date_str: str) -> pd.DataFrame:
-    """Extract player statistics from ESPN scoreboard response (limited stats from leaders)"""
-    players_list = []
-    
-    # Calculate season
-    year = int(date_str[:4])
-    month = int(date_str[5:7])
-    season = year if month >= 10 else year - 1
-    
-    events = scoreboard_data.get("events", [])
-    
-    for event in events:
-        event_id = event.get("id")
-        competitions = event.get("competitions", [])
-        
-        if not competitions:
-            continue
-            
-        comp = competitions[0]
-        competitors = comp.get("competitors", [])
-        
-        for competitor in competitors:
-            team_info = competitor.get("team", {})
-            team_id = safe_int(team_info.get("id"))
-            team_abbr = team_info.get("abbreviation")
-            
-            # Extract leader stats (this gives us top performers)
-            leaders = competitor.get("leaders", [])
-            
-            for leader_category in leaders:
-                category_name = leader_category.get("name", "")
-                category_leaders = leader_category.get("leaders", [])
-                
-                for leader in category_leaders:
-                    athlete = leader.get("athlete", {})
-                    player_id = safe_int(athlete.get("id"))
-                    player_name = athlete.get("displayName")
-                    
-                    # Skip if we already have this player for this game
-                    if any(p["player_id"] == player_id and p["event_id"] == event_id for p in players_list):
-                        continue
-                    
-                    # Initialize player stats
-                    player_stats = {
-                        "event_id": event_id,
-                        "date": date_str,
-                        "season": season,
-                        "team_id": team_id,
-                        "team_abbr": team_abbr,
-                        "player_id": player_id,
-                        "player": player_name,
-                        "starter": None,  # Not available in scoreboard
-                        "minutes": None,  # Not available in scoreboard
-                        "pts": None, "reb": None, "ast": None, "stl": None, "blk": None, "tov": None,
-                        "fgm": None, "fga": None, "fg3m": None, "fg3a": None, "ftm": None, "fta": None,
-                        "oreb": None, "dreb": None, "pf": None
-                    }
-                    
-                    # Extract the stat value for this category
-                    stat_value = safe_int(leader.get("value"))
-                    
-                    if category_name == "points":
-                        player_stats["pts"] = stat_value
-                    elif category_name == "rebounds":
-                        player_stats["reb"] = stat_value
-                    elif category_name == "assists":
-                        player_stats["ast"] = stat_value
-                    
-                    players_list.append(player_stats)
-    
-    if not players_list:
-        return pd.DataFrame(columns=[f.name for f in BOX_SCHEMA])
-    
-    df = pd.DataFrame(players_list)
-    return coerce_box_dtypes(df)
-
-def fetch_detailed_player_stats(event_id: str, date_str: str) -> pd.DataFrame:
-    """Fetch detailed player statistics from ESPN summary/boxscore endpoint"""
-    try:
-        summary_data = http_get_json(ESPN_SUMMARY, params={"event": event_id})
-        
-        # Calculate season
-        year = int(date_str[:4])
-        month = int(date_str[5:7])
-        season = year if month >= 10 else year - 1
-        
-        players_list = []
-        
-        # Look for boxscore data in the summary
-        boxscore = summary_data.get("boxscore", {})
-        teams = boxscore.get("teams", [])
-        
-        for team_data in teams:
-            team_info = team_data.get("team", {})
-            team_id = safe_int(team_info.get("id"))
-            team_abbr = team_info.get("abbreviation")
-            
-            # Look for player statistics
-            players = team_data.get("players", [])
-            
-            for player_group in players:
-                # ESPN groups players by position
-                position_players = player_group.get("players", [])
-                
-                for player in position_players:
-                    athlete = player.get("athlete", {})
-                    player_id = safe_int(athlete.get("id"))
-                    player_name = athlete.get("displayName")
-                    
-                    # Check if player started
-                    starter = player.get("starter", False)
-                    
-                    # Extract statistics
-                    stats = player.get("stats", [])
-                    stat_dict = {}
-                    
-                    # ESPN provides stats as an array, convert to dict
-                    if isinstance(stats, list) and len(stats) > 0:
-                        # Usually the first element contains the main stats
-                        if isinstance(stats[0], dict):
-                            stat_dict = stats[0]
-                        elif isinstance(stats[0], list):
-                            # Sometimes stats are in array format like [pts, reb, ast, ...]
-                            stat_labels = ["pts", "reb", "ast", "stl", "blk", "tov", "fgm", "fga", "fg3m", "fg3a", "ftm", "fta", "oreb", "dreb", "pf"]
-                            stat_dict = {label: safe_int(stats[0][i]) if i < len(stats[0]) else None for i, label in enumerate(stat_labels)}
-                    
-                    player_stats = {
-                        "event_id": event_id,
-                        "date": date_str,
-                        "season": season,
-                        "team_id": team_id,
-                        "team_abbr": team_abbr,
-                        "player_id": player_id,
-                        "player": player_name,
-                        "starter": starter,
-                        "minutes": stat_dict.get("minutes") or stat_dict.get("min"),
-                        "pts": safe_int(stat_dict.get("points") or stat_dict.get("pts")),
-                        "reb": safe_int(stat_dict.get("rebounds") or stat_dict.get("reb")),
-                        "ast": safe_int(stat_dict.get("assists") or stat_dict.get("ast")),
-                        "stl": safe_int(stat_dict.get("steals") or stat_dict.get("stl")),
-                        "blk": safe_int(stat_dict.get("blocks") or stat_dict.get("blk")),
-                        "tov": safe_int(stat_dict.get("turnovers") or stat_dict.get("tov")),
-                        "fgm": safe_int(stat_dict.get("fieldGoalsMade") or stat_dict.get("fgm")),
-                        "fga": safe_int(stat_dict.get("fieldGoalsAttempted") or stat_dict.get("fga")),
-                        "fg3m": safe_int(stat_dict.get("threePointFieldGoalsMade") or stat_dict.get("fg3m")),
-                        "fg3a": safe_int(stat_dict.get("threePointFieldGoalsAttempted") or stat_dict.get("fg3a")),
-                        "ftm": safe_int(stat_dict.get("freeThrowsMade") or stat_dict.get("ftm")),
-                        "fta": safe_int(stat_dict.get("freeThrowsAttempted") or stat_dict.get("fta")),
-                        "oreb": safe_int(stat_dict.get("offensiveRebounds") or stat_dict.get("oreb")),
-                        "dreb": safe_int(stat_dict.get("defensiveRebounds") or stat_dict.get("dreb")),
-                        "pf": safe_int(stat_dict.get("fouls") or stat_dict.get("pf"))
-                    }
-                    
-                    players_list.append(player_stats)
-        
-        if players_list:
-            df = pd.DataFrame(players_list)
-            return coerce_box_dtypes(df)
-        else:
-            print(f"No detailed player stats found for event {event_id}")
-            return pd.DataFrame(columns=[f.name for f in BOX_SCHEMA])
-            
-    except Exception as e:
-        print(f"Error fetching detailed player stats for event {event_id}: {e}")
-        return pd.DataFrame(columns=[f.name for f in BOX_SCHEMA])
-
 def ingest_date_via_espn(date_str: str) -> None:
     """Ingest games and player stats for a specific date using ESPN API"""
     ensure_tables()
@@ -416,7 +420,7 @@ def ingest_date_via_espn(date_str: str) -> None:
     # Convert date format for ESPN API
     yyyymmdd = date_str.replace("-", "")
     
-    # Get scoreboard
+    # Get scoreboard (this contains both games and leader stats)
     scoreboard_data = http_get_json(ESPN_SCOREBOARD, params={"dates": yyyymmdd})
     
     # Extract games
@@ -431,35 +435,30 @@ def ingest_date_via_espn(date_str: str) -> None:
     # Load games
     load_df(games_df, "games_daily")
     
-    # Fetch detailed player stats for each game
+    # Extract player stats from the same scoreboard data
     all_player_stats = []
     
     for _, game_row in games_df.iterrows():
         event_id = game_row["event_id"]
-        print(f"Fetching detailed player stats for game {event_id}")
+        print(f"Extracting player stats for game {event_id}")
         
-        detailed_stats = fetch_detailed_player_stats(event_id, date_str)
+        # Extract from leaders in scoreboard data
+        player_stats = extract_player_stats_from_leaders(scoreboard_data, event_id, date_str)
         
-        if not detailed_stats.empty:
-            all_player_stats.append(detailed_stats)
-            print(f"Found {len(detailed_stats)} player stat rows for game {event_id}")
+        if not player_stats.empty:
+            all_player_stats.append(player_stats)
+            print(f"  Found {len(player_stats)} player records")
         else:
-            # Fallback to basic stats from scoreboard
-            print(f"Falling back to scoreboard stats for game {event_id}")
-            basic_stats = extract_player_stats_from_scoreboard({"events": [{"id": event_id, "competitions": [{"competitors": []}]}]}, date_str)
-            if not basic_stats.empty:
-                all_player_stats.append(basic_stats)
-        
-        time.sleep(0.3)  # Be respectful to ESPN's servers
+            print(f"  No player stats found for game {event_id}")
     
     # Load all player stats
     if all_player_stats:
         combined_stats = pd.concat(all_player_stats, ignore_index=True)
         combined_stats = coerce_box_dtypes(combined_stats)
-        print(f"Loading {len(combined_stats)} player stat rows")
+        print(f"Loading {len(combined_stats)} total player stat rows")
         load_df(combined_stats, "player_boxscores")
     else:
-        print("No player stats found")
+        print("No player stats found for any games")
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Ingest NBA data using ESPN API")

@@ -7,7 +7,7 @@ import json
 import time
 import argparse
 import datetime
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Set
 
 import pandas as pd
 from pandas.api.types import is_object_dtype
@@ -176,7 +176,6 @@ def parse_minutes(minutes_str: str) -> str:
         if not minutes_str or minutes_str == "PT00M00.00S":
             return "0:00"
         
-        # Remove PT and S, split by M
         clean_str = minutes_str.replace("PT", "").replace("S", "")
         if "M" in clean_str:
             parts = clean_str.split("M")
@@ -187,64 +186,35 @@ def parse_minutes(minutes_str: str) -> str:
     except Exception:
         return "0:00"
 
-def get_game_ids_for_date(target_date: str) -> List[str]:
-    """Get game IDs for a specific date using sequential NBA Live API game IDs"""
-    try:
-        # Parse the target date
-        date_obj = datetime.datetime.strptime(target_date, "%Y-%m-%d")
-        
-        # Known reference points from testing:
-        # 0022400090 = 2024-10-26
-        # 0022400091 = 2024-10-27
-        # 0022400092 = 2024-10-27  
-        # 0022400093 = 2024-10-27
-        # 0022400094 = 2024-10-27
-        
-        reference_date = datetime.datetime(2024, 10, 26)
-        reference_game_id = 90
-        
-        # Calculate days difference
-        days_diff = (date_obj - reference_date).days
-        
-        # Estimate starting game ID based on average games per day
-        # NBA typically has 10-15 games per day during regular season
-        avg_games_per_day = 12
-        estimated_start = reference_game_id + (days_diff * avg_games_per_day)
-        
-        # For October 31, 2024 (5 days after Oct 26):
-        # Estimated start: 90 + (5 * 12) = 150
-        # But let's try a wider range around this estimate
-        
-        game_ids = []
-        
-        # Try a range of 30 game IDs around our estimate
-        start_range = max(estimated_start - 10, 90)  # Don't go below known working IDs
-        end_range = estimated_start + 20
-        
-        for game_num in range(start_range, end_range):
-            game_id = f"002240{game_num:04d}"
-            game_ids.append(game_id)
-        
-        print(f"Trying game IDs {start_range} to {end_range-1} for {target_date}")
-        return game_ids
-        
-    except Exception as e:
-        print(f"Error generating game IDs for {target_date}: {e}")
-        return []
-
-def get_games_for_date(target_date: str) -> pd.DataFrame:
-    """Get games for a specific date"""
-    print(f"Fetching games for {target_date}")
+def build_date_to_games_mapping(target_date: str, search_window: int = 100) -> Dict[str, List[str]]:
+    """
+    Build a mapping of dates to game IDs by systematically scanning game IDs.
     
-    # For historical dates, go directly to game ID estimation
-    # since we know NBA Live scoreboard only shows current games
-    print("Searching for historical games using game ID estimation...")
-    game_ids = get_game_ids_for_date(target_date)
+    Args:
+        target_date: The date we're looking for (YYYY-MM-DD)
+        search_window: Number of game IDs to scan in each direction
+        
+    Returns:
+        Dict mapping dates to lists of game IDs
+    """
+    print(f"Building date-to-games mapping around {target_date}")
     
-    games_data = []
-    successful_ids = []
+    date_to_games: Dict[str, List[str]] = {}
     
-    for game_id in game_ids:
+    # Start from a known working game ID and scan around it
+    # From previous tests, we know games around 140-150 are early November
+    base_game_id = 130
+    
+    # Scan backwards and forwards from base
+    start_id = max(base_game_id - search_window, 90)  # Don't go below known working range
+    end_id = base_game_id + search_window
+    
+    print(f"Scanning game IDs {start_id} to {end_id}")
+    
+    target_found = False
+    for game_num in range(start_id, end_id + 1):
+        game_id = f"002240{game_num:04d}"
+        
         try:
             box = boxscore.BoxScore(game_id)
             box_data = box.get_dict()
@@ -253,72 +223,78 @@ def get_games_for_date(target_date: str) -> pd.DataFrame:
                 game_info = box_data['game']
                 game_date = game_info.get('gameTimeUTC', '')[:10]
                 
-                if game_date == target_date:
-                    games_data.append(game_info)
-                    successful_ids.append(game_id)
-                    print(f"Found game {game_id} on {target_date}: {game_info.get('awayTeam', {}).get('teamName', 'Unknown')} @ {game_info.get('homeTeam', {}).get('teamName', 'Unknown')}")
-                elif game_date:
-                    # Game exists but different date - this helps us calibrate
-                    print(f"Game {game_id} is on {game_date} (not {target_date})")
+                if game_date:
+                    if game_date not in date_to_games:
+                        date_to_games[game_date] = []
+                    date_to_games[game_date].append(game_id)
+                    
+                    # Print progress for dates close to target
+                    if abs((datetime.datetime.strptime(game_date, "%Y-%m-%d") - 
+                           datetime.datetime.strptime(target_date, "%Y-%m-%d")).days) <= 5:
+                        teams = f"{game_info.get('awayTeam', {}).get('teamName', 'Unknown')} @ {game_info.get('homeTeam', {}).get('teamName', 'Unknown')}"
+                        print(f"  {game_id}: {game_date} - {teams}")
+                    
+                    if game_date == target_date:
+                        target_found = True
         
         except Exception:
-            # Game ID doesn't exist, continue silently
+            # Game ID doesn't exist, continue
             continue
     
+    # Print summary
+    sorted_dates = sorted(date_to_games.keys())
+    if sorted_dates:
+        print(f"\nFound games from {sorted_dates[0]} to {sorted_dates[-1]}")
+        for date in sorted_dates:
+            print(f"  {date}: {len(date_to_games[date])} games")
+    
+    if target_found:
+        print(f"\n✅ Found {len(date_to_games[target_date])} games for {target_date}")
+    else:
+        print(f"\n❌ No games found for {target_date}")
+        closest_dates = [d for d in sorted_dates if abs((datetime.datetime.strptime(d, "%Y-%m-%d") - 
+                                                        datetime.datetime.strptime(target_date, "%Y-%m-%d")).days) <= 3]
+        if closest_dates:
+            print(f"Closest dates with games: {closest_dates}")
+    
+    return date_to_games
+
+def get_games_for_date(target_date: str) -> pd.DataFrame:
+    """Get games for a specific date by building a date mapping"""
+    print(f"Searching for games on {target_date}")
+    
+    # Build the date-to-games mapping
+    date_mapping = build_date_to_games_mapping(target_date)
+    
+    if target_date not in date_mapping:
+        print(f"No games found for {target_date}")
+        return pd.DataFrame(columns=[f.name for f in GAMES_SCHEMA])
+    
+    game_ids = date_mapping[target_date]
+    print(f"Found {len(game_ids)} games for {target_date}: {game_ids}")
+    
+    # Get game data for each game ID
+    games_data = []
+    for game_id in game_ids:
+        try:
+            box = boxscore.BoxScore(game_id)
+            box_data = box.get_dict()
+            
+            if 'game' in box_data:
+                games_data.append(box_data['game'])
+        except Exception as e:
+            print(f"Error getting game data for {game_id}: {e}")
+    
     if games_data:
-        print(f"Successfully found {len(games_data)} games for {target_date}")
-        print(f"Game IDs: {successful_ids}")
         return extract_games_from_game_data(games_data, target_date)
     else:
-        print(f"No games found for {target_date}")
-        print("This could mean:")
-        print("1. No NBA games were scheduled on this date")
-        print("2. The game ID estimation needs adjustment")
-        print("3. The date is outside the current NBA season")
         return pd.DataFrame(columns=[f.name for f in GAMES_SCHEMA])
-
-def extract_games_from_scoreboard(games_list: List[Dict], date_str: str) -> pd.DataFrame:
-    """Extract game information from scoreboard games list"""
-    games_rows = []
-    
-    for game in games_list:
-        # Calculate season
-        year = int(date_str[:4])
-        month = int(date_str[5:7])
-        season = year if month >= 10 else year - 1
-        
-        home_team = game.get('homeTeam', {})
-        away_team = game.get('awayTeam', {})
-        
-        games_rows.append({
-            "event_id": game.get('gameId'),
-            "game_uid": game.get('gameCode'),
-            "date": date_str,
-            "season": season,
-            "status_type": game.get('gameStatusText', 'Unknown'),
-            "home_id": safe_int(home_team.get('teamId')),
-            "home_abbr": home_team.get('teamTricode'),
-            "home_score": safe_int(home_team.get('score', 0)),
-            "away_id": safe_int(away_team.get('teamId')),
-            "away_abbr": away_team.get('teamTricode'),
-            "away_score": safe_int(away_team.get('score', 0)),
-            "game_duration": safe_int(game.get('duration')),
-            "attendance": safe_int(game.get('attendance')),
-            "arena_name": game.get('arena', {}).get('arenaName')
-        })
-    
-    if not games_rows:
-        return pd.DataFrame(columns=[f.name for f in GAMES_SCHEMA])
-    
-    df = pd.DataFrame(games_rows)
-    return coerce_games_dtypes(df)
 
 def extract_games_from_game_data(games_data: List[Dict], date_str: str) -> pd.DataFrame:
     """Extract game information from box score game data"""
     games_rows = []
     
     for game in games_data:
-        # Calculate season
         year = int(date_str[:4])
         month = int(date_str[5:7])
         season = year if month >= 10 else year - 1
@@ -362,14 +338,12 @@ def get_player_stats_for_game(game_id: str, date_str: str) -> pd.DataFrame:
         
         game_info = box_data['game']
         
-        # Calculate season
         year = int(date_str[:4])
         month = int(date_str[5:7])
         season = year if month >= 10 else year - 1
         
         players_data = []
         
-        # Process both home and away teams
         for team_type in ['homeTeam', 'awayTeam']:
             if team_type not in game_info:
                 continue
@@ -381,18 +355,15 @@ def get_player_stats_for_game(game_id: str, date_str: str) -> pd.DataFrame:
             players = team.get('players', [])
             
             for player in players:
-                # Skip inactive players
                 if player.get('status') != 'ACTIVE':
                     continue
                 
-                # Extract player info
                 player_id = safe_int(player.get('personId'))
                 player_name = player.get('name')
                 jersey_num = player.get('jerseyNum')
                 position = player.get('position')
                 starter = player.get('starter') == '1'
                 
-                # Extract statistics
                 stats = player.get('statistics', {})
                 
                 player_row = {
@@ -447,7 +418,6 @@ def ingest_date_nba_live(date_str: str) -> None:
     
     print(f"Starting NBA data ingestion for {date_str}")
     
-    # Get games for the date
     games_df = get_games_for_date(date_str)
     
     if games_df.empty:
@@ -456,11 +426,9 @@ def ingest_date_nba_live(date_str: str) -> None:
     
     print(f"Found {len(games_df)} games for {date_str}")
     
-    # Load games data
     load_df(games_df, "games_daily")
     print(f"Loaded {len(games_df)} games to BigQuery")
     
-    # Get player statistics for each game
     all_player_stats = []
     
     for _, game_row in games_df.iterrows():
@@ -473,10 +441,8 @@ def ingest_date_nba_live(date_str: str) -> None:
             all_player_stats.append(player_stats)
             print(f"Found {len(player_stats)} player records for game {game_id}")
         
-        # Small delay to be respectful to the API
-        time.sleep(0.5)
+        time.sleep(0.3)
     
-    # Load all player statistics
     if all_player_stats:
         combined_stats = pd.concat(all_player_stats, ignore_index=True)
         combined_stats = coerce_box_dtypes(combined_stats)
@@ -517,7 +483,7 @@ def main() -> None:
         while current_date <= end_date:
             ingest_date_nba_live(current_date.isoformat())
             current_date += datetime.timedelta(days=1)
-            time.sleep(2)  # Longer delay for bulk operations
+            time.sleep(2)
         
         print(f"Backfill complete from {args.start} to {args.end}")
 

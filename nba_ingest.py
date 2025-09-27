@@ -212,7 +212,7 @@ def scan_season_range(start_date: str, end_date: str, season_prefix: str,
     max_days_from_start = max(0, (end_dt - season_start).days)
     
     # Calculate game ID bounds with conservative estimates
-    min_game_estimate = first_game_id + (min_days_from_start * 5)  # Conservative: 5 games/day minimum
+    min_game_estimate = first_game_id + (min_days_from_start * 3)  # Conservative: 5 games/day minimum
     max_game_estimate = first_game_id + (max_days_from_start * 15)  # Liberal: 15 games/day maximum
     
     # Add safety buffers

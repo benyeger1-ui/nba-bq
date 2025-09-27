@@ -25,55 +25,33 @@ SA_INFO    = json.loads(os.environ["GCP_SA_KEY"])
 CREDS      = service_account.Credentials.from_service_account_info(SA_INFO)
 BQ         = bigquery.Client(project=PROJECT_ID, credentials=CREDS)
 
-# -----------------------------------
-# Multiple API options - we'll try them in order
-# -----------------------------------
-
-# Option 1: Ball Don't Lie API (free, no key required)
-BALLDONTLIE_BASE = "https://www.balldontlie.io/api/v1"
-
-# Option 2: NBA Stats API (official but rate limited)
-NBA_STATS_BASE = "https://stats.nba.com/stats"
-
-# Option 3: ESPN (backup)
-ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba"
-
-# Option 4: RapidAPI NBA (requires free key)
-RAPIDAPI_BASE = "https://api-nba-v1.p.rapidapi.com"
+# ESPN API endpoints
+ESPN_SCOREBOARD = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard"
+ESPN_SUMMARY = "https://site.web.api.espn.com/apis/site/v2/sports/basketball/nba/summary"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-    "Accept": "application/json",
+    "Accept": "application/json, text/plain, */*",
+    "Referer": "https://www.espn.com/",
+    "Origin": "https://www.espn.com",
     "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
 }
 
-NBA_STATS_HEADERS = {
-    **HEADERS,
-    "Referer": "https://www.nba.com/",
-    "Origin": "https://www.nba.com",
-    "x-nba-stats-origin": "stats",
-    "x-nba-stats-token": "true"
-}
-
-def http_get_json(url: str, params: Optional[Dict[str, Any]] = None, headers: Optional[Dict[str, str]] = None, max_retries: int = 3) -> Dict[str, Any]:
-    if headers is None:
-        headers = HEADERS
-    
+def http_get_json(url: str, params: Optional[Dict[str, Any]] = None, max_retries: int = 3) -> Dict[str, Any]:
     last_err = None
-    for attempt in range(max_retries):
+    for _ in range(max_retries):
         try:
-            response = requests.get(url, params=params, headers=headers, timeout=30)
-            response.raise_for_status()
-            return response.json()
+            r = requests.get(url, params=params, headers=HEADERS, timeout=30)
+            r.raise_for_status()
+            return r.json()
         except Exception as e:
             last_err = e
-            if attempt < max_retries - 1:
-                time.sleep(0.8 * (attempt + 1))  # Exponential backoff
-    
-    raise last_err if last_err else RuntimeError("Request failed")
+            time.sleep(0.8)
+    raise last_err if last_err else RuntimeError("request failed")
 
 # -----------------------------------
-# BigQuery schemas (same as before)
+# BigQuery schemas
 # -----------------------------------
 GAMES_SCHEMA = [
     bigquery.SchemaField("event_id", "STRING"),
@@ -115,8 +93,6 @@ BOX_SCHEMA = [
     bigquery.SchemaField("dreb", "INT64"),
     bigquery.SchemaField("pf", "INT64"),
 ]
-
-# (Include all the utility functions from before - ensure_dataset, ensure_tables, load_df, coerce_*_dtypes, safe_int)
 
 def ensure_dataset() -> None:
     ds_id = f"{PROJECT_ID}.{DATASET}"
@@ -193,215 +169,300 @@ def safe_int(x: Any) -> Optional[int]:
     except Exception:
         return None
 
-# -----------------------------------
-# Ball Don't Lie API Functions
-# -----------------------------------
-def fetch_games_balldontlie(date_str: str) -> pd.DataFrame:
-    """Fetch games for a specific date using Ball Don't Lie API"""
+def safe_float(x: Any) -> Optional[float]:
     try:
-        url = f"{BALLDONTLIE_BASE}/games"
-        params = {"dates[]": date_str}
-        
-        data = http_get_json(url, params)
-        games = data.get("data", [])
-        
-        if not games:
-            print(f"No games found in Ball Don't Lie API for {date_str}")
-            return pd.DataFrame(columns=[f.name for f in GAMES_SCHEMA])
-        
-        games_list = []
-        for game in games:
-            # Season calculation
-            year = int(date_str[:4])
-            month = int(date_str[5:7])
-            season = year if month >= 10 else year - 1
-            
-            home_team = game.get("home_team", {})
-            visitor_team = game.get("visitor_team", {})
-            
-            games_list.append({
-                "event_id": str(game.get("id")),
-                "game_uid": f"bdl_{game.get('id')}",
-                "date": date_str,
-                "season": season,
-                "status_type": game.get("status", "Final"),
-                "home_id": safe_int(home_team.get("id")),
-                "home_abbr": home_team.get("abbreviation"),
-                "home_score": safe_int(game.get("home_team_score")),
-                "away_id": safe_int(visitor_team.get("id")),
-                "away_abbr": visitor_team.get("abbreviation"),
-                "away_score": safe_int(game.get("visitor_team_score"))
-            })
-        
-        df = pd.DataFrame(games_list)
-        return coerce_games_dtypes(df)
-        
-    except Exception as e:
-        print(f"Error fetching Ball Don't Lie games for {date_str}: {e}")
-        return pd.DataFrame(columns=[f.name for f in GAMES_SCHEMA])
+        return float(x) if x is not None and x != "" else None
+    except Exception:
+        return None
 
-def fetch_player_stats_balldontlie(game_id: str, date_str: str) -> pd.DataFrame:
-    """Fetch player stats for a specific game using Ball Don't Lie API"""
+def extract_games_from_scoreboard(scoreboard_data: Dict[str, Any], date_str: str) -> pd.DataFrame:
+    """Extract game information from ESPN scoreboard"""
+    games_list = []
+    
+    events = scoreboard_data.get("events", [])
+    
+    for event in events:
+        event_id = event.get("id")
+        game_uid = event.get("uid")
+        
+        competitions = event.get("competitions", [])
+        if not competitions:
+            continue
+            
+        comp = competitions[0]
+        competitors = comp.get("competitors", [])
+        
+        if len(competitors) < 2:
+            continue
+            
+        # Find home and away teams
+        home_team = None
+        away_team = None
+        
+        for competitor in competitors:
+            if competitor.get("homeAway") == "home":
+                home_team = competitor
+            elif competitor.get("homeAway") == "away":
+                away_team = competitor
+        
+        if not home_team or not away_team:
+            continue
+        
+        # Extract team info
+        home_team_info = home_team.get("team", {})
+        away_team_info = away_team.get("team", {})
+        
+        # Extract status
+        status = comp.get("status", {})
+        status_type = status.get("type", {}).get("name", "Unknown")
+        
+        # Calculate season
+        year = int(date_str[:4])
+        month = int(date_str[5:7])
+        season = year if month >= 10 else year - 1
+        
+        games_list.append({
+            "event_id": event_id,
+            "game_uid": game_uid,
+            "date": date_str,
+            "season": season,
+            "status_type": status_type,
+            "home_id": safe_int(home_team_info.get("id")),
+            "home_abbr": home_team_info.get("abbreviation"),
+            "home_score": safe_int(home_team.get("score")),
+            "away_id": safe_int(away_team_info.get("id")),
+            "away_abbr": away_team_info.get("abbreviation"),
+            "away_score": safe_int(away_team.get("score"))
+        })
+    
+    if not games_list:
+        return pd.DataFrame(columns=[f.name for f in GAMES_SCHEMA])
+    
+    df = pd.DataFrame(games_list)
+    return coerce_games_dtypes(df)
+
+def extract_player_stats_from_scoreboard(scoreboard_data: Dict[str, Any], date_str: str) -> pd.DataFrame:
+    """Extract player statistics from ESPN scoreboard response (limited stats from leaders)"""
+    players_list = []
+    
+    # Calculate season
+    year = int(date_str[:4])
+    month = int(date_str[5:7])
+    season = year if month >= 10 else year - 1
+    
+    events = scoreboard_data.get("events", [])
+    
+    for event in events:
+        event_id = event.get("id")
+        competitions = event.get("competitions", [])
+        
+        if not competitions:
+            continue
+            
+        comp = competitions[0]
+        competitors = comp.get("competitors", [])
+        
+        for competitor in competitors:
+            team_info = competitor.get("team", {})
+            team_id = safe_int(team_info.get("id"))
+            team_abbr = team_info.get("abbreviation")
+            
+            # Extract leader stats (this gives us top performers)
+            leaders = competitor.get("leaders", [])
+            
+            for leader_category in leaders:
+                category_name = leader_category.get("name", "")
+                category_leaders = leader_category.get("leaders", [])
+                
+                for leader in category_leaders:
+                    athlete = leader.get("athlete", {})
+                    player_id = safe_int(athlete.get("id"))
+                    player_name = athlete.get("displayName")
+                    
+                    # Skip if we already have this player for this game
+                    if any(p["player_id"] == player_id and p["event_id"] == event_id for p in players_list):
+                        continue
+                    
+                    # Initialize player stats
+                    player_stats = {
+                        "event_id": event_id,
+                        "date": date_str,
+                        "season": season,
+                        "team_id": team_id,
+                        "team_abbr": team_abbr,
+                        "player_id": player_id,
+                        "player": player_name,
+                        "starter": None,  # Not available in scoreboard
+                        "minutes": None,  # Not available in scoreboard
+                        "pts": None, "reb": None, "ast": None, "stl": None, "blk": None, "tov": None,
+                        "fgm": None, "fga": None, "fg3m": None, "fg3a": None, "ftm": None, "fta": None,
+                        "oreb": None, "dreb": None, "pf": None
+                    }
+                    
+                    # Extract the stat value for this category
+                    stat_value = safe_int(leader.get("value"))
+                    
+                    if category_name == "points":
+                        player_stats["pts"] = stat_value
+                    elif category_name == "rebounds":
+                        player_stats["reb"] = stat_value
+                    elif category_name == "assists":
+                        player_stats["ast"] = stat_value
+                    
+                    players_list.append(player_stats)
+    
+    if not players_list:
+        return pd.DataFrame(columns=[f.name for f in BOX_SCHEMA])
+    
+    df = pd.DataFrame(players_list)
+    return coerce_box_dtypes(df)
+
+def fetch_detailed_player_stats(event_id: str, date_str: str) -> pd.DataFrame:
+    """Fetch detailed player statistics from ESPN summary/boxscore endpoint"""
     try:
-        url = f"{BALLDONTLIE_BASE}/stats"
-        params = {"game_ids[]": game_id}
+        summary_data = http_get_json(ESPN_SUMMARY, params={"event": event_id})
         
-        data = http_get_json(url, params)
-        stats = data.get("data", [])
-        
-        if not stats:
-            return pd.DataFrame(columns=[f.name for f in BOX_SCHEMA])
-        
-        # Season calculation
+        # Calculate season
         year = int(date_str[:4])
         month = int(date_str[5:7])
         season = year if month >= 10 else year - 1
         
         players_list = []
-        for stat in stats:
-            player = stat.get("player", {})
-            team = stat.get("team", {})
-            
-            # Check if player started (Ball Don't Lie doesn't provide this directly)
-            minutes_str = stat.get("min", "0:00")
-            starter = None  # We'll have to infer this or leave it null
-            
-            players_list.append({
-                "event_id": game_id,
-                "date": date_str,
-                "season": season,
-                "team_id": safe_int(team.get("id")),
-                "team_abbr": team.get("abbreviation"),
-                "player_id": safe_int(player.get("id")),
-                "player": f"{player.get('first_name', '')} {player.get('last_name', '')}".strip(),
-                "starter": starter,
-                "minutes": minutes_str,
-                "pts": safe_int(stat.get("pts")),
-                "reb": safe_int(stat.get("reb")),
-                "ast": safe_int(stat.get("ast")),
-                "stl": safe_int(stat.get("stl")),
-                "blk": safe_int(stat.get("blk")),
-                "tov": safe_int(stat.get("turnover")),
-                "fgm": safe_int(stat.get("fgm")),
-                "fga": safe_int(stat.get("fga")),
-                "fg3m": safe_int(stat.get("fg3m")),
-                "fg3a": safe_int(stat.get("fg3a")),
-                "ftm": safe_int(stat.get("ftm")),
-                "fta": safe_int(stat.get("fta")),
-                "oreb": safe_int(stat.get("oreb")),
-                "dreb": safe_int(stat.get("dreb")),
-                "pf": safe_int(stat.get("pf"))
-            })
         
-        df = pd.DataFrame(players_list)
-        return coerce_box_dtypes(df)
+        # Look for boxscore data in the summary
+        boxscore = summary_data.get("boxscore", {})
+        teams = boxscore.get("teams", [])
         
+        for team_data in teams:
+            team_info = team_data.get("team", {})
+            team_id = safe_int(team_info.get("id"))
+            team_abbr = team_info.get("abbreviation")
+            
+            # Look for player statistics
+            players = team_data.get("players", [])
+            
+            for player_group in players:
+                # ESPN groups players by position
+                position_players = player_group.get("players", [])
+                
+                for player in position_players:
+                    athlete = player.get("athlete", {})
+                    player_id = safe_int(athlete.get("id"))
+                    player_name = athlete.get("displayName")
+                    
+                    # Check if player started
+                    starter = player.get("starter", False)
+                    
+                    # Extract statistics
+                    stats = player.get("stats", [])
+                    stat_dict = {}
+                    
+                    # ESPN provides stats as an array, convert to dict
+                    if isinstance(stats, list) and len(stats) > 0:
+                        # Usually the first element contains the main stats
+                        if isinstance(stats[0], dict):
+                            stat_dict = stats[0]
+                        elif isinstance(stats[0], list):
+                            # Sometimes stats are in array format like [pts, reb, ast, ...]
+                            stat_labels = ["pts", "reb", "ast", "stl", "blk", "tov", "fgm", "fga", "fg3m", "fg3a", "ftm", "fta", "oreb", "dreb", "pf"]
+                            stat_dict = {label: safe_int(stats[0][i]) if i < len(stats[0]) else None for i, label in enumerate(stat_labels)}
+                    
+                    player_stats = {
+                        "event_id": event_id,
+                        "date": date_str,
+                        "season": season,
+                        "team_id": team_id,
+                        "team_abbr": team_abbr,
+                        "player_id": player_id,
+                        "player": player_name,
+                        "starter": starter,
+                        "minutes": stat_dict.get("minutes") or stat_dict.get("min"),
+                        "pts": safe_int(stat_dict.get("points") or stat_dict.get("pts")),
+                        "reb": safe_int(stat_dict.get("rebounds") or stat_dict.get("reb")),
+                        "ast": safe_int(stat_dict.get("assists") or stat_dict.get("ast")),
+                        "stl": safe_int(stat_dict.get("steals") or stat_dict.get("stl")),
+                        "blk": safe_int(stat_dict.get("blocks") or stat_dict.get("blk")),
+                        "tov": safe_int(stat_dict.get("turnovers") or stat_dict.get("tov")),
+                        "fgm": safe_int(stat_dict.get("fieldGoalsMade") or stat_dict.get("fgm")),
+                        "fga": safe_int(stat_dict.get("fieldGoalsAttempted") or stat_dict.get("fga")),
+                        "fg3m": safe_int(stat_dict.get("threePointFieldGoalsMade") or stat_dict.get("fg3m")),
+                        "fg3a": safe_int(stat_dict.get("threePointFieldGoalsAttempted") or stat_dict.get("fg3a")),
+                        "ftm": safe_int(stat_dict.get("freeThrowsMade") or stat_dict.get("ftm")),
+                        "fta": safe_int(stat_dict.get("freeThrowsAttempted") or stat_dict.get("fta")),
+                        "oreb": safe_int(stat_dict.get("offensiveRebounds") or stat_dict.get("oreb")),
+                        "dreb": safe_int(stat_dict.get("defensiveRebounds") or stat_dict.get("dreb")),
+                        "pf": safe_int(stat_dict.get("fouls") or stat_dict.get("pf"))
+                    }
+                    
+                    players_list.append(player_stats)
+        
+        if players_list:
+            df = pd.DataFrame(players_list)
+            return coerce_box_dtypes(df)
+        else:
+            print(f"No detailed player stats found for event {event_id}")
+            return pd.DataFrame(columns=[f.name for f in BOX_SCHEMA])
+            
     except Exception as e:
-        print(f"Error fetching Ball Don't Lie player stats for game {game_id}: {e}")
+        print(f"Error fetching detailed player stats for event {event_id}: {e}")
         return pd.DataFrame(columns=[f.name for f in BOX_SCHEMA])
 
-# -----------------------------------
-# ESPN Fallback Functions (from your original code)
-# -----------------------------------
-def fetch_games_espn(date_str: str) -> pd.DataFrame:
-    """Fallback to ESPN API for games"""
-    try:
-        yyyymmdd = date_str.replace("-", "")
-        url = f"{ESPN_BASE}/scoreboard"
-        params = {"dates": yyyymmdd}
-        
-        data = http_get_json(url, params)
-        events = data.get("events", [])
-        
-        if not events:
-            return pd.DataFrame(columns=[f.name for f in GAMES_SCHEMA])
-        
-        # (Implementation similar to your original ESPN code)
-        # Simplified version for brevity
-        games_list = []
-        for event in events:
-            competitions = event.get("competitions", [{}])
-            comp = competitions[0] if competitions else {}
-            
-            competitors = comp.get("competitors", [])
-            home = next((c for c in competitors if c.get("homeAway") == "home"), {})
-            away = next((c for c in competitors if c.get("homeAway") == "away"), {})
-            
-            games_list.append({
-                "event_id": event.get("id"),
-                "game_uid": event.get("uid"),
-                "date": date_str,
-                "season": int(date_str[:4]) if int(date_str[5:7]) >= 10 else int(date_str[:4]) - 1,
-                "status_type": comp.get("status", {}).get("type", {}).get("name"),
-                "home_id": safe_int((home.get("team", {}) or {}).get("id")),
-                "home_abbr": (home.get("team", {}) or {}).get("abbreviation"),
-                "home_score": safe_int(home.get("score")),
-                "away_id": safe_int((away.get("team", {}) or {}).get("id")),
-                "away_abbr": (away.get("team", {}) or {}).get("abbreviation"),
-                "away_score": safe_int(away.get("score"))
-            })
-        
-        df = pd.DataFrame(games_list)
-        return coerce_games_dtypes(df)
-        
-    except Exception as e:
-        print(f"Error fetching ESPN games for {date_str}: {e}")
-        return pd.DataFrame(columns=[f.name for f in GAMES_SCHEMA])
-
-# -----------------------------------
-# Main ingestion function with fallbacks
-# -----------------------------------
-def ingest_date_with_fallbacks(date_str: str) -> None:
-    """Try multiple APIs in order until one works"""
+def ingest_date_via_espn(date_str: str) -> None:
+    """Ingest games and player stats for a specific date using ESPN API"""
     ensure_tables()
     
-    print(f"Fetching NBA data for {date_str}")
+    print(f"Fetching ESPN data for {date_str}")
     
-    # Try Ball Don't Lie first (most reliable for stats)
-    games_df = fetch_games_balldontlie(date_str)
-    api_used = "Ball Don't Lie"
+    # Convert date format for ESPN API
+    yyyymmdd = date_str.replace("-", "")
+    
+    # Get scoreboard
+    scoreboard_data = http_get_json(ESPN_SCOREBOARD, params={"dates": yyyymmdd})
+    
+    # Extract games
+    games_df = extract_games_from_scoreboard(scoreboard_data, date_str)
     
     if games_df.empty:
-        print("Ball Don't Lie API failed, trying ESPN...")
-        games_df = fetch_games_espn(date_str)
-        api_used = "ESPN"
-    
-    if games_df.empty:
-        print(f"No games found for {date_str} in any API")
+        print(f"No games found for {date_str}")
         return
     
-    print(f"Found {len(games_df)} games using {api_used} API")
+    print(f"Found {len(games_df)} games for {date_str}")
     
     # Load games
     load_df(games_df, "games_daily")
     
-    # Fetch player stats (only Ball Don't Lie supports this easily)
-    if api_used == "Ball Don't Lie":
-        all_player_stats = []
+    # Fetch detailed player stats for each game
+    all_player_stats = []
+    
+    for _, game_row in games_df.iterrows():
+        event_id = game_row["event_id"]
+        print(f"Fetching detailed player stats for game {event_id}")
         
-        for _, game_row in games_df.iterrows():
-            game_id = game_row["event_id"]
-            print(f"Fetching player stats for game {game_id}")
-            
-            player_stats_df = fetch_player_stats_balldontlie(game_id, date_str)
-            if not player_stats_df.empty:
-                all_player_stats.append(player_stats_df)
-                print(f"Found {len(player_stats_df)} player stat rows")
-            
-            time.sleep(0.5)  # Be respectful
+        detailed_stats = fetch_detailed_player_stats(event_id, date_str)
         
-        if all_player_stats:
-            combined_stats = pd.concat(all_player_stats, ignore_index=True)
-            combined_stats = coerce_box_dtypes(combined_stats)
-            print(f"Loading {len(combined_stats)} player stat rows")
-            load_df(combined_stats, "player_boxscores")
+        if not detailed_stats.empty:
+            all_player_stats.append(detailed_stats)
+            print(f"Found {len(detailed_stats)} player stat rows for game {event_id}")
         else:
-            print("No player stats found")
+            # Fallback to basic stats from scoreboard
+            print(f"Falling back to scoreboard stats for game {event_id}")
+            basic_stats = extract_player_stats_from_scoreboard({"events": [{"id": event_id, "competitions": [{"competitors": []}]}]}, date_str)
+            if not basic_stats.empty:
+                all_player_stats.append(basic_stats)
+        
+        time.sleep(0.3)  # Be respectful to ESPN's servers
+    
+    # Load all player stats
+    if all_player_stats:
+        combined_stats = pd.concat(all_player_stats, ignore_index=True)
+        combined_stats = coerce_box_dtypes(combined_stats)
+        print(f"Loading {len(combined_stats)} player stat rows")
+        load_df(combined_stats, "player_boxscores")
     else:
-        print(f"Player stats not available with {api_used} API")
+        print("No player stats found")
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Ingest NBA data using multiple APIs with fallbacks")
+    parser = argparse.ArgumentParser(description="Ingest NBA data using ESPN API")
     parser.add_argument("--mode", choices=["daily", "backfill"], default="daily")
     parser.add_argument("--start", help="YYYY-MM-DD start date for backfill")
     parser.add_argument("--end", help="YYYY-MM-DD end date for backfill")
@@ -409,12 +470,14 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.date:
-        ingest_date_with_fallbacks(args.date)
+        ingest_date_via_espn(args.date)
+        print(f"Ingestion complete for {args.date}")
         return
 
     if args.mode == "daily":
         yesterday = datetime.date.today() - datetime.timedelta(days=1)
-        ingest_date_with_fallbacks(yesterday.isoformat())
+        ingest_date_via_espn(yesterday.isoformat())
+        print(f"Daily ingestion complete for {yesterday.isoformat()}")
         return
 
     if args.mode == "backfill":
@@ -427,9 +490,11 @@ def main() -> None:
         
         current_date = start_date
         while current_date <= end_date:
-            ingest_date_with_fallbacks(current_date.isoformat())
+            ingest_date_via_espn(current_date.isoformat())
             current_date += datetime.timedelta(days=1)
             time.sleep(1)  # Be respectful between dates
+        
+        print(f"Backfill complete from {args.start} to {args.end}")
 
 if __name__ == "__main__":
     main()

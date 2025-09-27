@@ -13,8 +13,7 @@ import pytz
 import pandas as pd
 from pandas.api.types import is_object_dtype
 
-# Import the proper NBA API endpoints for date-based searches
-from nba_api.stats.endpoints import leaguegamefinder, scoreboardv2
+# Import only the reliable NBA API endpoints
 from nba_api.live.nba.endpoints import scoreboard, boxscore
 
 from google.cloud import bigquery
@@ -88,75 +87,14 @@ BOX_SCHEMA = [
 
 def get_games_for_date_proper(target_date: str) -> List[str]:
     """
-    Get games for a specific date using NBA API's proper date-based endpoints.
-    This is the correct way to search by date.
+    Get games for a specific date using reliable methods.
+    Falls back to targeted game ID search since stats API is unreliable.
     """
-    print(f"Searching for games on {target_date} using NBA API date search")
+    print(f"Searching for games on {target_date}")
     
+    # Method 1: Try live scoreboard first (most reliable for recent games)
     try:
-        # Method 1: Try scoreboardv2 (stats API) which allows date parameter
-        print("Trying ScoreboardV2 with date parameter...")
-        scoreboard_v2 = scoreboardv2.ScoreboardV2(game_date=target_date)
-        scoreboard_data = scoreboard_v2.get_dict()
-        
-        game_ids = []
-        
-        # Extract game IDs from ScoreboardV2 response
-        if 'resultSets' in scoreboard_data:
-            for result_set in scoreboard_data['resultSets']:
-                if result_set['name'] == 'GameHeader':
-                    headers = result_set['headers']
-                    rows = result_set['rowSet']
-                    
-                    # Find the GAME_ID column
-                    game_id_idx = headers.index('GAME_ID') if 'GAME_ID' in headers else None
-                    
-                    if game_id_idx is not None:
-                        for row in rows:
-                            game_id = row[game_id_idx]
-                            if game_id:
-                                game_ids.append(str(game_id))
-                                print(f"  Found game: {game_id}")
-        
-        if game_ids:
-            print(f"✅ Found {len(game_ids)} games for {target_date} via ScoreboardV2")
-            return game_ids
-        
-    except Exception as e:
-        print(f"ScoreboardV2 failed: {e}")
-    
-    try:
-        # Method 2: Try LeagueGameFinder for date range
-        print("Trying LeagueGameFinder...")
-        
-        # Convert date to the format NBA API expects
-        date_obj = datetime.datetime.strptime(target_date, "%Y-%m-%d")
-        nba_date_format = date_obj.strftime("%m/%d/%Y")
-        
-        game_finder = leaguegamefinder.LeagueGameFinder(
-            date_from_nullable=nba_date_format,
-            date_to_nullable=nba_date_format
-        )
-        
-        games_df = game_finder.get_data_frames()[0]
-        
-        if not games_df.empty:
-            # Extract unique game IDs (each game appears twice, once for each team)
-            game_ids = games_df['GAME_ID'].unique().tolist()
-            game_ids = [str(gid) for gid in game_ids]
-            
-            print(f"✅ Found {len(game_ids)} games for {target_date} via LeagueGameFinder")
-            for game_id in game_ids:
-                print(f"  Found game: {game_id}")
-            
-            return game_ids
-        
-    except Exception as e:
-        print(f"LeagueGameFinder failed: {e}")
-    
-    # Method 3: Fallback to live API (for very recent games)
-    try:
-        print("Trying live scoreboard API as fallback...")
+        print("Trying live scoreboard API...")
         sb = scoreboard.ScoreBoard()
         sb_data = sb.get_dict()
         
@@ -178,19 +116,78 @@ def get_games_for_date_proper(target_date: str) -> List[str]:
                         if et_date == target_date:
                             game_ids.append(game_id)
                             teams = f"{game.get('awayTeam', {}).get('teamName', 'Unknown')} @ {game.get('homeTeam', {}).get('teamName', 'Unknown')}"
-                            print(f"  Found game: {game_id} - {teams}")
+                            print(f"  Found: {game_id} - {teams}")
                     except Exception:
                         continue
         
         if game_ids:
-            print(f"✅ Found {len(game_ids)} games for {target_date} via live scoreboard")
+            print(f"Found {len(game_ids)} games for {target_date} via live scoreboard")
             return game_ids
         
     except Exception as e:
         print(f"Live scoreboard failed: {e}")
     
-    print(f"❌ No games found for {target_date} using any method")
-    return []
+    # Method 2: Smart game ID search for historical dates
+    print("Using targeted game ID search for historical date...")
+    
+    target_dt = datetime.datetime.strptime(target_date, "%Y-%m-%d")
+    season_start = datetime.datetime(2024, 10, 22)  # 2024-25 season start
+    
+    if target_dt < season_start:
+        print(f"Target date {target_date} is before season start")
+        return []
+    
+    days_from_start = (target_dt - season_start).days
+    
+    # More precise estimation based on known patterns
+    # Oct 22 (opening night): games start around 90-95
+    # Roughly 10-12 games per day average
+    base_game_id = 90
+    games_per_day = 10
+    
+    estimated_start = base_game_id + (days_from_start * games_per_day)
+    search_range = 25  # Search +/- 25 games around estimate
+    
+    start_id = max(estimated_start - search_range, 90)
+    end_id = estimated_start + search_range
+    
+    print(f"Searching game IDs {start_id} to {end_id} for {target_date} ({days_from_start} days from season start)")
+    
+    game_ids = []
+    for game_num in range(start_id, end_id + 1):
+        game_id = f"002240{game_num:04d}"
+        
+        try:
+            box = boxscore.BoxScore(game_id)
+            box_data = box.get_dict()
+            
+            if 'game' in box_data:
+                game_info = box_data['game']
+                game_date_utc = game_info.get('gameTimeUTC', '')
+                
+                if game_date_utc:
+                    # Convert to ET date
+                    try:
+                        game_dt = datetime.datetime.fromisoformat(game_date_utc.replace('Z', '+00:00'))
+                        et_dt = game_dt.astimezone(ET_TZ)
+                        et_date = et_dt.date().isoformat()
+                        
+                        if et_date == target_date:
+                            game_ids.append(game_id)
+                            teams = f"{game_info.get('awayTeam', {}).get('teamName', 'Unknown')} @ {game_info.get('homeTeam', {}).get('teamName', 'Unknown')}"
+                            print(f"  Found: {game_id} - {teams}")
+                    except Exception:
+                        continue
+        
+        except Exception:
+            continue  # Game doesn't exist, continue searching
+    
+    if game_ids:
+        print(f"Found {len(game_ids)} games for {target_date}")
+    else:
+        print(f"No games found for {target_date}")
+    
+    return game_ids
 
 def get_games_for_date(target_date: str) -> pd.DataFrame:
     """Get games for a specific date using proper NBA API date search"""

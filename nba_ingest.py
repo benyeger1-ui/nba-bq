@@ -218,8 +218,8 @@ def scan_season_range(start_date: str, end_date: str, season_prefix: str,
     
     # Calculate maximum game ID based on the end date
     max_days_from_start = max(0, (end_dt - season_start).days)
-    max_game_estimate = start_id + (max_days_from_start * 15)  # Liberal: 15 games/day maximum
-    end_id = max_game_estimate + 100  # Add larger safety buffer
+    max_game_estimate = start_id + (max_days_from_start * 25)  # Increased to 25 games/day maximum
+    end_id = max_game_estimate + 200  # Larger safety buffer
     
     print(f"  Scanning {season_prefix} range: game IDs {start_id} to {end_id}")
     print(f"  Date range: {start_date} to {end_date}")

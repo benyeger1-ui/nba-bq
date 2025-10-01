@@ -12,7 +12,7 @@ SA_KEY = json.loads(os.environ["GCP_SA_KEY"])
 creds = service_account.Credentials.from_service_account_info(SA_KEY)
 bq = bigquery.Client(project=PROJECT_ID, credentials=creds)
 
-TABLE = "games_daily"  # final table name
+TABLE = "games_daily_old"  # final table name
 
 def ensure_dataset():
     ds_id = f"{PROJECT_ID}.{DATASET}"

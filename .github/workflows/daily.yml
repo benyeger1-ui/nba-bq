@@ -1,4 +1,4 @@
-name: NBA to BigQuery - daily
+name: NBA to BigQuery - daily (old script)
 
 on:
   schedule:

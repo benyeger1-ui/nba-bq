@@ -25,7 +25,7 @@ print("\n🔄 Step 3: Getting your NBA fantasy league...")
 gm = game.Game(sc, 'nba')
 
 # YOUR LEAGUE ID GOES HERE
-league_id = '75582'  
+league_id = '52855'  
 lg = league.League(sc, league_id)
 print("✅ Found your league!")
 

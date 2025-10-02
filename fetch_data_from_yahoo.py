@@ -253,7 +253,6 @@ for trans_type in ['add', 'drop', 'trade']:
         
         while True:
             try:
-                # Use direct API call with pagination support
                 response = sc.session.get(
                     f"https://fantasysports.yahooapis.com/fantasy/v2/league/{league_id}/transactions",
                     params={
@@ -266,6 +265,20 @@ for trans_type in ['add', 'drop', 'trade']:
                 
                 data = response.json()
                 
+                # Debug first call
+                if start == 0 and trans_type == 'add':
+                    print(f"\nDEBUG: Response keys: {data.keys() if isinstance(data, dict) else 'not dict'}")
+                    if 'fantasy_content' in data:
+                        fc = data['fantasy_content']
+                        print(f"DEBUG: fantasy_content keys: {fc.keys() if isinstance(fc, dict) else 'not dict'}")
+                        if 'league' in fc:
+                            print(f"DEBUG: league type: {type(fc['league'])}")
+                            if isinstance(fc['league'], list):
+                                print(f"DEBUG: league length: {len(fc['league'])}")
+                                for idx, item in enumerate(fc['league']):
+                                    if isinstance(item, dict):
+                                        print(f"DEBUG: league[{idx}] keys: {list(item.keys())[:5]}")
+                
                 if 'fantasy_content' not in data:
                     break
                 
@@ -275,6 +288,7 @@ for trans_type in ['add', 'drop', 'trade']:
                 
                 league_data = content['league']
                 found_transactions = False
+                trans_count = 0
                 
                 if isinstance(league_data, list):
                     for item in league_data:
@@ -282,6 +296,8 @@ for trans_type in ['add', 'drop', 'trade']:
                             transactions = item['transactions']
                             
                             if isinstance(transactions, dict):
+                                trans_count = transactions.get('count', 0)
+                                
                                 for key in transactions:
                                     if key == 'count':
                                         continue
@@ -358,7 +374,6 @@ for trans_type in ['add', 'drop', 'trade']:
                                             
                                             seen_trans_players.add(trans_player_key)
                                             
-                                            # Fix drop transactions
                                             if transaction_type == 'drop' and dest_team and not source_team:
                                                 source_team = dest_team
                                                 source_team_name = dest_team_name
@@ -399,7 +414,7 @@ for trans_type in ['add', 'drop', 'trade']:
                                                 'league_id': league_id
                                             })
                 
-                if not found_transactions:
+                if not found_transactions or trans_count < count_per_call:
                     break
                 
                 start += count_per_call
@@ -407,6 +422,8 @@ for trans_type in ['add', 'drop', 'trade']:
                 
             except Exception as e:
                 print(f"Error at start={start}: {e}")
+                import traceback
+                traceback.print_exc()
                 break
         
         print(f"✓ {len([t for t in all_transactions if t['type'] == trans_type])} records")
@@ -426,6 +443,8 @@ if all_transactions:
     job = client.load_table_from_dataframe(df_trans, table_id, job_config=job_config)
     job.result()
     print(f"Loaded {len(df_trans)} transactions!")
+else:
+    print("No transactions collected")
     
 # ==================== ROSTERS ====================
 print("\n=== FETCHING ROSTERS ===")

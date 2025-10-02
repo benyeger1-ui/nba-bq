@@ -21,7 +21,8 @@ print("\n🔄 Step 3: Getting your NBA fantasy league...")
 gm = game.Game(sc, 'nba')
 
 # YOUR LEAGUE ID - update this with your league ID from find_league.py
-league_id = '466.l.52855'  # Example: '449.l.75582'
+league_id = '454.l.21729'  # LAST YEAR
+# league_id = '466.l.52855'  # CURRENT LEAGUE
 lg = league.League(sc, league_id)
 print("✅ Found your league!")
 

@@ -370,5 +370,142 @@ if all_transactions:
     job = client.load_table_from_dataframe(df_trans, table_id, job_config=job_config)
     job.result()
     print(f"Loaded {len(df_trans)} transactions!")    
+
+# ==================== ROSTERS ====================
+print("\n=== FETCHING ROSTERS ===")
+try:
+    player_records = []
+    
+    for team_key, team_name in team_names.items():
+        try:
+            team_obj = lg.to_team(team_key)
+            roster = team_obj.roster()
+            
+            for player in roster:
+                if isinstance(player, dict):
+                    player_records.append({
+                        'team_key': team_key,
+                        'team_name': team_name,
+                        'player_id': player.get('player_id', ''),
+                        'player_name': player.get('name', ''),
+                        'position': player.get('position_type', ''),
+                        'selected_position': player.get('selected_position', ''),
+                        'status': player.get('status', ''),
+                        'nba_team': player.get('editorial_team_abbr', ''),
+                        'extracted_at': timestamp,
+                        'league_id': league_id
+                    })
+        except Exception as e:
+            print(f"Error getting roster for {team_key}: {e}")
+        
+        time.sleep(0.3)  # Rate limit protection
+    
+    if player_records:
+        df_players = pd.DataFrame(player_records)
+        
+        table_id = f"{project_id}.{dataset}.rosters"
+        job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND", autodetect=True)
+        job = client.load_table_from_dataframe(df_players, table_id, job_config=job_config)
+        job.result()
+        print(f"Loaded {len(df_players)} rostered players!")
+    else:
+        print("No roster data collected")
+        
+except Exception as e:
+    print(f"Error with rosters: {e}")
+    import traceback
+    traceback.print_exc()
+
+# ==================== PLAYER POOL ====================
+print("\n=== FETCHING PLAYER POOL ===")
+try:
+    all_players_list = []
+    
+    # Fetch in batches
+    for start in range(0, 500, 25):  # Get up to 500 players in batches of 25
+        try:
+            response = sc.session.get(
+                f"https://fantasysports.yahooapis.com/fantasy/v2/league/{league_id}/players",
+                params={'format': 'json', 'start': start, 'count': 25}
+            )
+            data = response.json()
+            
+            found_players = False
+            if 'fantasy_content' in data and 'league' in data['fantasy_content']:
+                league_data = data['fantasy_content']['league']
+                if isinstance(league_data, list):
+                    for item in league_data:
+                        if isinstance(item, dict) and 'players' in item:
+                            players = item['players']
+                            
+                            for key in players:
+                                if key == 'count':
+                                    continue
+                                
+                                if 'player' in players[key]:
+                                    found_players = True
+                                    player_list = players[key]['player']
+                                    p = {}
+                                    
+                                    if isinstance(player_list, list):
+                                        for pitem in player_list:
+                                            if isinstance(pitem, list):
+                                                for pi in pitem:
+                                                    if isinstance(pi, dict):
+                                                        p.update(pi)
+                                            elif isinstance(pitem, dict):
+                                                p.update(pitem)
+                                    
+                                    player_name = ''
+                                    if 'name' in p:
+                                        name_field = p['name']
+                                        if isinstance(name_field, dict):
+                                            player_name = name_field.get('full', '')
+                                    
+                                    ownership_type = 'available'
+                                    if 'ownership' in p:
+                                        own = p['ownership']
+                                        if isinstance(own, dict):
+                                            ownership_type = own.get('ownership_type', 'available')
+                                    
+                                    if player_name:
+                                        all_players_list.append({
+                                            'player_id': p.get('player_id', ''),
+                                            'player_name': player_name,
+                                            'position': p.get('position_type', ''),
+                                            'status': p.get('status', ''),
+                                            'nba_team': p.get('editorial_team_abbr', ''),
+                                            'ownership_type': ownership_type,
+                                            'extracted_at': timestamp,
+                                            'league_id': league_id
+                                        })
+            
+            if not found_players:
+                break  # No more players
+            
+            time.sleep(0.5)  # Rate limit protection
+            
+        except Exception as e:
+            print(f"Error at start={start}: {e}")
+            break
+    
+    if all_players_list:
+        df_all_players = pd.DataFrame(all_players_list).drop_duplicates(subset=['player_id'])
+        print(f"Collected {len(df_all_players)} unique players")
+        
+        table_id = f"{project_id}.{dataset}.player_pool"
+        job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND", autodetect=True)
+        job = client.load_table_from_dataframe(df_all_players, table_id, job_config=job_config)
+        job.result()
+        print(f"Loaded {len(df_all_players)} players to pool!")
+    else:
+        print("No players collected for pool")
+        
+except Exception as e:
+    print(f"Error with player pool: {e}")
+    import traceback
+    traceback.print_exc()
+    
+print("\n=== COMPLETE ===")
     
 print("\n=== COMPLETE ===")

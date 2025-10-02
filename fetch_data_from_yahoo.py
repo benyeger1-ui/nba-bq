@@ -98,6 +98,17 @@ for week in range(start_week, min(current_week + 1, end_week + 1)):
                                     matchup = matchups[key]['matchup']
                                     teams_data = matchup.get('0', {}).get('teams', {})
                                     team1_list = teams_data.get('0', {}).get('team', [[]])[0]
+                                    # Add this right after: team1_list = teams_data.get('0', {}).get('team', [[]])[0]
+                                    if week == 1 and key == '0':  # Debug first matchup only
+                                        print("\n=== DEBUG TEAM1 STRUCTURE ===")
+                                        for idx, item in enumerate(team1_list):
+                                            print(f"Item {idx}: {type(item)}")
+                                            if isinstance(item, dict):
+                                                print(f"  Keys: {list(item.keys())[:10]}")  # First 10 keys
+                                                if 'team_points' in item:
+                                                    print(f"  team_points: {item['team_points']}")
+                                                if 'team_stats' in item:
+                                                    print(f"  team_stats keys: {list(item['team_stats'].keys()) if isinstance(item['team_stats'], dict) else 'not a dict'}")
                                     team2_list = teams_data.get('1', {}).get('team', [[]])[0]
                                     
                                     # Parse team 1
@@ -240,22 +251,96 @@ else:
 
 # ==================== TRANSACTIONS ====================
 print("\n=== FETCHING TRANSACTIONS ===")
-try:
-    # Try getting more transactions
-    for trans_type in ['add', 'drop', 'trade']:
-        print(f"Fetching {trans_type} transactions...")
-        try:
-            trans_list = lg.transactions(trans_type, 500)  # Get up to 500
-            print(f"  Raw response type: {type(trans_list)}")
-            if trans_list:
-                print(f"  Found {len(trans_list) if isinstance(trans_list, list) else 'N/A'} {trans_type} transactions")
-        except Exception as e:
-            print(f"  Error: {e}")
-    
-    print("Transaction fetching complete (no data structure handler yet)")
-except Exception as e:
-    print(f"Error: {e}")
+all_transactions = []
 
+for trans_type in ['add', 'drop', 'trade']:
+    try:
+        trans_list = lg.transactions(trans_type, 1000)
+        print(f"Processing {len(trans_list)} {trans_type} transactions...")
+        
+        for trans in trans_list:
+            if not isinstance(trans, dict):
+                continue
+            
+            trans_key = trans.get('transaction_key', '')
+            trans_id = trans.get('transaction_id', '')
+            trans_type_val = trans.get('type', trans_type)
+            status = trans.get('status', '')
+            trans_timestamp = trans.get('timestamp', '')
+            
+            # Get players involved
+            players = trans.get('players', {})
+            if isinstance(players, dict):
+                for pkey in players:
+                    if pkey == 'count':
+                        continue
+                    
+                    player_obj = players[pkey]
+                    if isinstance(player_obj, dict) and 'player' in player_obj:
+                        player_list = player_obj['player']
+                        
+                        # Parse player info
+                        player_id = ''
+                        player_name = ''
+                        for pitem in player_list:
+                            if isinstance(pitem, list):
+                                for pi in pitem:
+                                    if isinstance(pi, dict):
+                                        if 'player_id' in pi:
+                                            player_id = pi['player_id']
+                                        if 'name' in pi:
+                                            pname = pi['name']
+                                            if isinstance(pname, dict):
+                                                player_name = pname.get('full', '')
+                            elif isinstance(pitem, dict):
+                                if 'player_id' in pitem:
+                                    player_id = pitem['player_id']
+                                if 'name' in pitem:
+                                    pname = pitem['name']
+                                    if isinstance(pname, dict):
+                                        player_name = pname.get('full', '')
+                        
+                        # Get transaction data
+                        trans_data_list = player_obj.get('transaction_data', [])
+                        dest_team = ''
+                        source_team = ''
+                        
+                        if isinstance(trans_data_list, list):
+                            for td in trans_data_list:
+                                if isinstance(td, dict):
+                                    dest_team = td.get('destination_team_key', '')
+                                    source_team = td.get('source_team_key', '')
+                        
+                        all_transactions.append({
+                            'transaction_key': trans_key,
+                            'transaction_id': trans_id,
+                            'type': trans_type_val,
+                            'status': status,
+                            'timestamp': trans_timestamp,
+                            'player_id': player_id,
+                            'player_name': player_name,
+                            'destination_team_key': dest_team,
+                            'source_team_key': source_team,
+                            'extracted_at': timestamp,
+                            'league_id': league_id
+                        })
+        
+    except Exception as e:
+        print(f"Error processing {trans_type}: {e}")
+        import traceback
+        traceback.print_exc()
+
+if all_transactions:
+    df_trans = pd.DataFrame(all_transactions)
+    print(f"Total parsed: {len(df_trans)} transaction records")
+    
+    table_id = f"{project_id}.{dataset}.transactions"
+    job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND", autodetect=True)
+    job = client.load_table_from_dataframe(df_trans, table_id, job_config=job_config)
+    job.result()
+    print(f"Loaded {len(df_trans)} transactions!")
+else:
+    print("No transactions parsed")
 # ==================== ROSTERS ====================
 print("\n=== FETCHING ROSTERS ===")
 try:
@@ -297,51 +382,60 @@ try:
 except Exception as e:
     print(f"Error: {e}")
 
-# ==================== ALL PLAYERS (ROSTERED + AVAILABLE) ====================
+# ==================== ALL PLAYERS ====================
 print("\n=== FETCHING COMPLETE PLAYER POOL ===")
 try:
-    # Method 1: Get all players using player search
     all_players_list = []
     
-    # Get top 500 players by searching
-    print("Fetching all NBA players...")
-    try:
-        # Use the league players endpoint
-        response = sc.session.get(
-            f"https://fantasysports.yahooapis.com/fantasy/v2/league/{league_id}/players",
-            params={'format': 'json', 'count': 500}
-        )
-        data = response.json()
-        
-        if 'fantasy_content' in data:
-            content = data['fantasy_content']
-            if 'league' in content:
-                league_data = content['league']
+    # Fetch in batches
+    for start in range(0, 1000, 25):  # Get up to 1000 players in batches of 25
+        try:
+            response = sc.session.get(
+                f"https://fantasysports.yahooapis.com/fantasy/v2/league/{league_id}/players",
+                params={'format': 'json', 'start': start, 'count': 25}
+            )
+            data = response.json()
+            
+            found_players = False
+            if 'fantasy_content' in data and 'league' in data['fantasy_content']:
+                league_data = data['fantasy_content']['league']
                 if isinstance(league_data, list):
                     for item in league_data:
                         if isinstance(item, dict) and 'players' in item:
                             players = item['players']
+                            player_count = players.get('count', 0)
+                            
                             for key in players:
-                                if key != 'count' and 'player' in players[key]:
-                                    player_data = players[key]['player']
-                                    if isinstance(player_data, list):
-                                        p = {}
-                                        for pitem in player_data:
-                                            if isinstance(pitem, dict):
+                                if key == 'count':
+                                    continue
+                                
+                                if 'player' in players[key]:
+                                    found_players = True
+                                    player_list = players[key]['player']
+                                    p = {}
+                                    
+                                    if isinstance(player_list, list):
+                                        for pitem in player_list:
+                                            if isinstance(pitem, list):
+                                                for pi in pitem:
+                                                    if isinstance(pi, dict):
+                                                        p.update(pi)
+                                            elif isinstance(pitem, dict):
                                                 p.update(pitem)
-                                        
-                                        player_name = ''
-                                        if 'name' in p:
-                                            name_field = p['name']
-                                            if isinstance(name_field, dict):
-                                                player_name = name_field.get('full', '')
-                                        
-                                        ownership_type = 'available'
-                                        if 'ownership' in p:
-                                            own = p['ownership']
-                                            if isinstance(own, dict):
-                                                ownership_type = own.get('ownership_type', 'available')
-                                        
+                                    
+                                    player_name = ''
+                                    if 'name' in p:
+                                        name_field = p['name']
+                                        if isinstance(name_field, dict):
+                                            player_name = name_field.get('full', '')
+                                    
+                                    ownership_type = 'available'
+                                    if 'ownership' in p:
+                                        own = p['ownership']
+                                        if isinstance(own, dict):
+                                            ownership_type = own.get('ownership_type', 'available')
+                                    
+                                    if player_name:  # Only add if we got a name
                                         all_players_list.append({
                                             'player_id': p.get('player_id', ''),
                                             'player_name': player_name,
@@ -352,12 +446,16 @@ try:
                                             'extracted_at': timestamp,
                                             'league_id': league_id
                                         })
-        
-        print(f"Fetched {len(all_players_list)} players from league")
-    except Exception as e:
-        print(f"Error fetching all players: {e}")
-        import traceback
-        traceback.print_exc()
+            
+            if not found_players:
+                break  # No more players
+            
+            print(f"Fetched batch starting at {start}, total so far: {len(all_players_list)}")
+            time.sleep(0.3)
+            
+        except Exception as e:
+            print(f"Error at start={start}: {e}")
+            break
     
     if all_players_list:
         df_all_players = pd.DataFrame(all_players_list).drop_duplicates(subset=['player_id'])
@@ -366,13 +464,12 @@ try:
         job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND", autodetect=True)
         job = client.load_table_from_dataframe(df_all_players, table_id, job_config=job_config)
         job.result()
-        print(f"Loaded {len(df_all_players)} players to pool!")
-    else:
-        print("No players collected")
+        print(f"Loaded {len(df_all_players)} unique players!")
 except Exception as e:
     print(f"Error: {e}")
     import traceback
     traceback.print_exc()
+
 
 print("\n=== ALL DONE ===")
 print(f"Tables updated in {project_id}.{dataset}")

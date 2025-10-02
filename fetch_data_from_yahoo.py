@@ -242,6 +242,7 @@ if all_matchup_records:
 # ==================== TRANSACTIONS ====================
 print("\n=== FETCHING TRANSACTIONS ===")
 all_transactions = []
+seen_trans_players = set()  # Track (transaction_id, player_id) to avoid duplicates
 
 for trans_type in ['add', 'drop', 'trade']:
     try:
@@ -272,7 +273,8 @@ for trans_type in ['add', 'drop', 'trade']:
                     source_team = ''
                     source_team_name = ''
                     source_type = ''
-                    transaction_type = ''  # Specific type for this player
+                    dest_type = ''
+                    transaction_type = ''
                     
                     player_obj = players[pkey]
                     
@@ -300,40 +302,54 @@ for trans_type in ['add', 'drop', 'trade']:
                                     if isinstance(trans_data_list, list) and len(trans_data_list) > 0:
                                         trans_data = trans_data_list[0]
                                         
-                                        # Get the specific type for THIS player
-                                        transaction_type = trans_data.get('type', trans_type_val)
-                                        
+                                        transaction_type = trans_data.get('type', '')
                                         dest_team = trans_data.get('destination_team_key', '')
                                         dest_team_name = trans_data.get('destination_team_name', '')
                                         source_team = trans_data.get('source_team_key', '')
                                         source_team_name = trans_data.get('source_team_name', '')
                                         source_type = trans_data.get('source_type', '')
-                                        
-                                        # Handle destination_type for drops
                                         dest_type = trans_data.get('destination_type', '')
-                                        if dest_type == 'waivers':
-                                            dest_team = 'waivers'
-                                            dest_team_name = 'Waivers'
                     
-                    # Only add if we got a player name
-                    if player_name:
-                        all_transactions.append({
-                            'transaction_key': trans_key,
-                            'transaction_id': trans_id,
-                            'type': trans_type_val,  # Overall transaction type
-                            'player_transaction_type': transaction_type,  # Specific type for this player
-                            'status': status,
-                            'timestamp': trans_timestamp,
-                            'player_id': player_id,
-                            'player_name': player_name,
-                            'destination_team_key': dest_team if dest_team else None,
-                            'destination_team_name': dest_team_name if dest_team_name else None,
-                            'source_team_key': source_team if source_team else None,
-                            'source_team_name': source_team_name if source_team_name else None,
-                            'source_type': source_type if source_type else None,
-                            'extracted_at': timestamp,
-                            'league_id': league_id
-                        })
+                    # Skip if no player name or if we've seen this transaction+player combo
+                    if not player_name:
+                        continue
+                    
+                    trans_player_key = f"{trans_id}_{player_id}"
+                    if trans_player_key in seen_trans_players:
+                        continue
+                    
+                    seen_trans_players.add(trans_player_key)
+                    
+                    # Infer action based on destination/source
+                    action = transaction_type
+                    if not action:
+                        if dest_team and not source_team:
+                            action = 'add'
+                        elif source_team and not dest_team:
+                            action = 'drop'
+                        elif source_type == 'freeagents':
+                            action = 'add'
+                        elif dest_type == 'waivers':
+                            action = 'drop'
+                    
+                    all_transactions.append({
+                        'transaction_key': trans_key,
+                        'transaction_id': trans_id,
+                        'type': trans_type_val,
+                        'player_action': action,  # What happened to THIS player
+                        'status': status,
+                        'timestamp': trans_timestamp,
+                        'player_id': player_id,
+                        'player_name': player_name,
+                        'destination_team_key': dest_team if dest_team else None,
+                        'destination_team_name': dest_team_name if dest_team_name else None,
+                        'source_team_key': source_team if source_team else None,
+                        'source_team_name': source_team_name if source_team_name else None,
+                        'source_type': source_type if source_type else None,
+                        'destination_type': dest_type if dest_type else None,
+                        'extracted_at': timestamp,
+                        'league_id': league_id
+                    })
         
         print(f"✓ {len([t for t in all_transactions if t['type'] == trans_type])} records")
         time.sleep(2)
@@ -345,14 +361,14 @@ for trans_type in ['add', 'drop', 'trade']:
 
 if all_transactions:
     df_trans = pd.DataFrame(all_transactions)
-    print(f"\nSample transactions:")
-    print(df_trans[['type', 'player_transaction_type', 'player_name', 'destination_team_name', 'source_team_name']].head(15))
+    print(f"\nTotal unique transactions: {len(df_trans)}")
+    print(f"\nSample:")
+    print(df_trans[['transaction_id', 'type', 'player_action', 'player_name', 'destination_team_name', 'source_team_name']].head(20))
     
     table_id = f"{project_id}.{dataset}.transactions"
     job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE", autodetect=True)
     job = client.load_table_from_dataframe(df_trans, table_id, job_config=job_config)
     job.result()
-    print(f"Loaded {len(df_trans)} transactions!")
-    
+    print(f"Loaded {len(df_trans)} transactions!")    
     
 print("\n=== COMPLETE ===")

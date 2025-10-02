@@ -433,7 +433,7 @@ try:
     all_players_list = []
     
     # Fetch in batches
-    for start in range(0, 500, 25):  # Get up to 500 players in batches of 25
+    for start in range(0, 1000, 25):  # Get up to 500 players in batches of 25
         try:
             response = sc.session.get(
                 f"https://fantasysports.yahooapis.com/fantasy/v2/league/{league_id}/players",
@@ -517,6 +517,121 @@ except Exception as e:
     import traceback
     traceback.print_exc()
     
-print("\n=== COMPLETE ===")
+# ==================== PLAYER RANKINGS ====================
+print("\n=== FETCHING PLAYER RANKINGS ===")
+try:
+    all_rankings = []
+    
+    # Define stat periods to fetch
+    stat_types = [
+        ('season', 'Season'),
+        ('lastmonth', 'Last 30 Days'),
+        ('lastweek', 'Last 7 Days')
+    ]
+    
+    for stat_type, period_name in stat_types:
+        print(f"Fetching {period_name} rankings...", end=" ")
+        try:
+            # Fetch top ranked players for this period
+            for start in range(0, 250, 25):  # Get top 200 players
+                try:
+                    response = sc.session.get(
+                        f"https://fantasysports.yahooapis.com/fantasy/v2/league/{league_id}/players",
+                        params={
+                            'format': 'json',
+                            'start': start,
+                            'count': 25,
+                            'sort': 'AR',  # Average Rank
+                            'sort_type': stat_type,
+                            'position': 'ALL'
+                        }
+                    )
+                    data = response.json()
+                    
+                    if 'fantasy_content' in data and 'league' in data['fantasy_content']:
+                        league_data = data['fantasy_content']['league']
+                        if isinstance(league_data, list):
+                            for item in league_data:
+                                if isinstance(item, dict) and 'players' in item:
+                                    players = item['players']
+                                    
+                                    for key in players:
+                                        if key == 'count':
+                                            continue
+                                        
+                                        if 'player' in players[key]:
+                                            player_list = players[key]['player']
+                                            p = {}
+                                            
+                                            if isinstance(player_list, list):
+                                                for pitem in player_list:
+                                                    if isinstance(pitem, list):
+                                                        for pi in pitem:
+                                                            if isinstance(pi, dict):
+                                                                p.update(pi)
+                                                    elif isinstance(pitem, dict):
+                                                        p.update(pitem)
+                                            
+                                            # Extract player info
+                                            player_id = p.get('player_id', '')
+                                            player_name = ''
+                                            if 'name' in p:
+                                                name_field = p['name']
+                                                if isinstance(name_field, dict):
+                                                    player_name = name_field.get('full', '')
+                                            
+                                            # Extract ranking
+                                            rank = None
+                                            if 'player_points' in p:
+                                                pp = p['player_points']
+                                                if isinstance(pp, dict):
+                                                    rank = pp.get('total', None)
+                                            
+                                            # Extract average rank from player stats
+                                            avg_rank = None
+                                            if 'player_advanced_stats' in p:
+                                                pas = p['player_advanced_stats']
+                                                if isinstance(pas, dict):
+                                                    avg_rank = pas.get('average_rank', None)
+                                            
+                                            if player_name:
+                                                all_rankings.append({
+                                                    'player_id': player_id,
+                                                    'player_name': player_name,
+                                                    'position': p.get('position_type', ''),
+                                                    'nba_team': p.get('editorial_team_abbr', ''),
+                                                    'ranking_period': period_name,
+                                                    'rank': avg_rank if avg_rank else rank,
+                                                    'extracted_at': timestamp,
+                                                    'league_id': league_id
+                                                })
+                    
+                    time.sleep(0.5)
+                except Exception as e:
+                    print(f"Error at start={start}: {e}")
+                    break
+            
+            print("✓")
+            time.sleep(1)
+            
+        except Exception as e:
+            print(f"✗ {e}")
+    
+    if all_rankings:
+        df_rankings = pd.DataFrame(all_rankings)
+        print(f"Collected {len(df_rankings)} ranking records")
+        
+        table_id = f"{project_id}.{dataset}.player_rankings"
+        job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE", autodetect=True)
+        job = client.load_table_from_dataframe(df_rankings, table_id, job_config=job_config)
+        job.result()
+        print(f"Loaded {len(df_rankings)} player rankings!")
+    else:
+        print("No rankings collected")
+        
+except Exception as e:
+    print(f"Error with rankings: {e}")
+    import traceback
+    traceback.print_exc()
     
 print("\n=== COMPLETE ===")

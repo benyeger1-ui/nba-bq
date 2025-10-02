@@ -88,37 +88,84 @@ except Exception as e:
 # ==================== MATCHUPS ====================
 print("\n🔄 Step 5: Fetching matchups data...")
 try:
-    # Get current week matchups
-    matchups = lg.matchups()
+    current_week = lg.current_week()
+    matchups_data = lg.matchups(week=current_week)
     
-    # Flatten matchups data
+    print(f"   Current week: {current_week}")
+    
+    # Parse the complex nested structure
     matchup_records = []
-    for week, week_matchups in matchups.items():
-        for matchup in week_matchups:
-            matchup_records.append({
-                'week': week,
-                'team1': matchup.get('team1', ''),
-                'team2': matchup.get('team2', ''),
-                'team1_points': matchup.get('team1_points', 0),
-                'team2_points': matchup.get('team2_points', 0),
-                'winner': matchup.get('winner', ''),
-                'extracted_at': timestamp,
-                'league_id': league_id
-            })
     
-    df_matchups = pd.DataFrame(matchup_records)
+    if isinstance(matchups_data, dict) and 'fantasy_content' in matchups_data:
+        # Navigate the nested structure
+        content = matchups_data['fantasy_content']
+        if 'league' in content and isinstance(content['league'], list):
+            for item in content['league']:
+                if isinstance(item, dict) and 'scoreboard' in item:
+                    scoreboard = item['scoreboard']
+                    if '0' in scoreboard and 'matchups' in scoreboard['0']:
+                        matchups = scoreboard['0']['matchups']
+                        
+                        # Iterate through matchups
+                        for key in matchups:
+                            if key != 'count' and 'matchup' in matchups[key]:
+                                matchup = matchups[key]['matchup']
+                                
+                                # Get team data
+                                teams_data = matchup.get('0', {}).get('teams', {})
+                                team1 = teams_data.get('0', {}).get('team', [[]])[0]
+                                team2 = teams_data.get('1', {}).get('team', [[]])[0]
+                                
+                                # Extract team info
+                                team1_key = next((item.get('team_key') for item in team1 if isinstance(item, dict) and 'team_key' in item), '')
+                                team1_name = next((item.get('name') for item in team1 if isinstance(item, dict) and 'name' in item), '')
+                                team2_key = next((item.get('team_key') for item in team2 if isinstance(item, dict) and 'team_key' in item), '')
+                                team2_name = next((item.get('name') for item in team2 if isinstance(item, dict) and 'name' in item), '')
+                                
+                                # Extract points
+                                team1_points_data = next((item.get('team_points') for item in team1 if isinstance(item, dict) and 'team_points' in item), {})
+                                team2_points_data = next((item.get('team_points') for item in team2 if isinstance(item, dict) and 'team_points' in item), {})
+                                
+                                team1_points = team1_points_data.get('total', 0) if isinstance(team1_points_data, dict) else 0
+                                team2_points = team2_points_data.get('total', 0) if isinstance(team2_points_data, dict) else 0
+                                
+                                matchup_records.append({
+                                    'week': matchup.get('week', current_week),
+                                    'week_start': matchup.get('week_start', ''),
+                                    'week_end': matchup.get('week_end', ''),
+                                    'status': matchup.get('status', ''),
+                                    'is_playoffs': matchup.get('is_playoffs', '0'),
+                                    'is_tied': matchup.get('is_tied', 0),
+                                    'winner_team_key': matchup.get('winner_team_key', ''),
+                                    'team1_key': team1_key,
+                                    'team1_name': team1_name,
+                                    'team1_points': float(team1_points) if team1_points else 0.0,
+                                    'team2_key': team2_key,
+                                    'team2_name': team2_name,
+                                    'team2_points': float(team2_points) if team2_points else 0.0,
+                                    'extracted_at': timestamp,
+                                    'league_id': league_id
+                                })
     
-    if not df_matchups.empty:
+    if matchup_records:
+        df_matchups = pd.DataFrame(matchup_records)
+        print(f"   Preview: {df_matchups.head()}")
+        
         table_id = f"{project_id}.{dataset}.matchups"
-        job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
+        job_config = bigquery.LoadJobConfig(
+            write_disposition="WRITE_APPEND",
+            autodetect=True
+        )
         job = client.load_table_from_dataframe(df_matchups, table_id, job_config=job_config)
         job.result()
         print(f"✅ Loaded {len(df_matchups)} matchups to matchups table!")
     else:
-        print("⚠️ No matchup data available")
+        print("⚠️ No matchup data available for current week")
+        
 except Exception as e:
     print(f"❌ Error with matchups: {e}")
-
+    import traceback
+    traceback.print_exc()
 # ==================== ROSTERS/PLAYERS ====================
 print("\n🔄 Step 6: Fetching player rosters...")
 try:

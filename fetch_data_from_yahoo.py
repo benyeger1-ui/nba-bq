@@ -242,15 +242,31 @@ if all_matchup_records:
 # ==================== TRANSACTIONS ====================
 print("\n=== FETCHING TRANSACTIONS ===")
 all_transactions = []
+debug_done = False
 
 for trans_type in ['add', 'drop', 'trade']:
     try:
         print(f"Fetching {trans_type}...", end=" ")
-        trans_list = lg.transactions(trans_type, 500)  # Reduced from 1000
+        trans_list = lg.transactions(trans_type, 500)
         
         for trans in trans_list:
             if not isinstance(trans, dict):
                 continue
+            
+            # DEBUG: Print first transaction structure
+            if not debug_done and trans_type == 'add':
+                print(f"\n\nDEBUG TRANSACTION STRUCTURE:")
+                print(f"Transaction keys: {trans.keys()}")
+                if 'players' in trans:
+                    players = trans['players']
+                    print(f"Players type: {type(players)}")
+                    if isinstance(players, dict):
+                        first_key = [k for k in players.keys() if k != 'count'][0]
+                        player_obj = players[first_key]
+                        print(f"Player object keys: {player_obj.keys()}")
+                        if 'transaction_data' in player_obj:
+                            print(f"Transaction_data: {player_obj['transaction_data']}")
+                debug_done = True
             
             trans_key = trans.get('transaction_key', '')
             trans_id = trans.get('transaction_id', '')
@@ -288,6 +304,7 @@ for trans_type in ['add', 'drop', 'trade']:
                                     if isinstance(pname, dict):
                                         player_name = pname.get('full', '')
                         
+                        # Try different paths for transaction data
                         trans_data_list = player_obj.get('transaction_data', [])
                         dest_team = ''
                         source_team = ''
@@ -295,12 +312,27 @@ for trans_type in ['add', 'drop', 'trade']:
                         if isinstance(trans_data_list, list):
                             for td in trans_data_list:
                                 if isinstance(td, dict):
-                                    dest_team = td.get('destination_team_key', '')
+                                    # Try all possible keys
+                                    dest_team = td.get('destination_team_key', td.get('team_key', ''))
                                     source_team = td.get('source_team_key', '')
+                                    
+                                    # For add/drop, source might be in different field
+                                    if not source_team and 'source_type' in td:
+                                        source_type = td.get('source_type', '')
+                                        if source_type == 'freeagents':
+                                            source_team = 'waivers'
+                        
+                        # For drops, the team is the one dropping
+                        if trans_type_val == 'drop' and not dest_team and dest_team == '':
+                            # Check if there's a team key in transaction_data
+                            if isinstance(trans_data_list, list):
+                                for td in trans_data_list:
+                                    if isinstance(td, dict) and 'team_key' in td:
+                                        source_team = td.get('team_key', '')
                         
                         # Map team keys to names
-                        dest_team_name = team_names.get(dest_team, '')
-                        source_team_name = team_names.get(source_team, '')
+                        dest_team_name = team_names.get(dest_team, '') if dest_team and dest_team != 'waivers' else ''
+                        source_team_name = team_names.get(source_team, '') if source_team and source_team != 'waivers' else ''
                         
                         all_transactions.append({
                             'transaction_key': trans_key,
@@ -310,27 +342,29 @@ for trans_type in ['add', 'drop', 'trade']:
                             'timestamp': trans_timestamp,
                             'player_id': player_id,
                             'player_name': player_name,
-                            'destination_team_key': dest_team,
-                            'destination_team_name': dest_team_name,
-                            'source_team_key': source_team,
-                            'source_team_name': source_team_name,
+                            'destination_team_key': dest_team if dest_team else None,
+                            'destination_team_name': dest_team_name if dest_team_name else None,
+                            'source_team_key': source_team if source_team else None,
+                            'source_team_name': source_team_name if source_team_name else None,
                             'extracted_at': timestamp,
                             'league_id': league_id
                         })
         
         print(f"✓ {len([t for t in all_transactions if t['type'] == trans_type])} records")
-        time.sleep(2)  # Longer sleep between transaction types
+        time.sleep(2)
         
     except Exception as e:
         print(f"✗ {e}")
 
 if all_transactions:
     df_trans = pd.DataFrame(all_transactions)
+    print(f"\nSample transaction data:")
+    print(df_trans[['type', 'player_name', 'destination_team_name', 'source_team_name']].head(10))
     
     table_id = f"{project_id}.{dataset}.transactions"
     job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND", autodetect=True)
     job = client.load_table_from_dataframe(df_trans, table_id, job_config=job_config)
     job.result()
     print(f"Loaded {len(df_trans)} transactions!")
-
+    
 print("\n=== COMPLETE ===")

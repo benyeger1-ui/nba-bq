@@ -28,7 +28,7 @@ lg = league.League(sc, league_id)
 print("Found your league!")
 
 # Get dataset name
-dataset = os.environ.get('BQ_DATASET', 'nba_yahoo')
+dataset = os.environ.get('BQ_DATASET_NBA_YAHOO')
 timestamp = datetime.now()
 
 # Get league settings to find total weeks

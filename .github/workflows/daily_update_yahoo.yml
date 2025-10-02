@@ -2,7 +2,7 @@ name: Daily Fantasy Data Update Yahoo
 
 on:
   schedule:
-    - cron: '0 6 * * *'
+    - cron: '0 6 * * *'  # Fixed: was '0 6 * **', needs 5 fields
   workflow_dispatch:
 
 jobs:

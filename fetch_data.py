@@ -34,17 +34,57 @@ print("\n🔄 Step 4: Fetching standings data...")
 try:
     standings = lg.standings()
     df_standings = pd.DataFrame(standings)
+    
+    # Convert rank to integer (use regular int, not Int64)
+    df_standings['rank'] = pd.to_numeric(df_standings['rank'], errors='coerce').fillna(0).astype(int)
+    
+    # Extract outcome totals into separate columns
+    if 'outcome_totals' in df_standings.columns:
+        # Parse the outcome_totals dictionary
+        outcome_data = df_standings['outcome_totals'].apply(
+            lambda x: x if isinstance(x, dict) else {}
+        )
+        df_standings['wins'] = outcome_data.apply(lambda x: int(x.get('wins', 0)) if x.get('wins') else 0)
+        df_standings['losses'] = outcome_data.apply(lambda x: int(x.get('losses', 0)) if x.get('losses') else 0)
+        df_standings['ties'] = outcome_data.apply(lambda x: int(x.get('ties', 0)) if x.get('ties') else 0)
+        df_standings['percentage'] = outcome_data.apply(lambda x: float(x.get('percentage', 0)) if x.get('percentage') else 0.0)
+        
+        # Drop the original outcome_totals column
+        df_standings = df_standings.drop('outcome_totals', axis=1)
+    
+    # Convert games_back to float (handle '-' as 0)
+    if 'games_back' in df_standings.columns:
+        df_standings['games_back'] = df_standings['games_back'].replace('-', '0')
+        df_standings['games_back'] = pd.to_numeric(df_standings['games_back'], errors='coerce').fillna(0).astype(float)
+    
+    # Convert playoff_seed to integer (use regular int, not Int64)
+    if 'playoff_seed' in df_standings.columns:
+        df_standings['playoff_seed'] = pd.to_numeric(df_standings['playoff_seed'], errors='coerce').fillna(0).astype(int)
+    
     df_standings['extracted_at'] = timestamp
     df_standings['league_id'] = league_id
     
+    # Convert all column types to basic types for BigQuery compatibility
+    for col in df_standings.columns:
+        if df_standings[col].dtype == 'object':
+            df_standings[col] = df_standings[col].astype(str)
+    
+    print(f"   Preview: {df_standings.head()}")
+    print(f"   Columns: {df_standings.columns.tolist()}")
+    print(f"   Data types: {df_standings.dtypes.to_dict()}")
+    
     table_id = f"{project_id}.{dataset}.standings"
-    job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
+    job_config = bigquery.LoadJobConfig(
+        write_disposition="WRITE_APPEND",
+        autodetect=True
+    )
     job = client.load_table_from_dataframe(df_standings, table_id, job_config=job_config)
     job.result()
     print(f"✅ Loaded {len(df_standings)} teams to standings table!")
 except Exception as e:
     print(f"❌ Error with standings: {e}")
-
+    import traceback
+    traceback.print_exc()
 # ==================== MATCHUPS ====================
 print("\n🔄 Step 5: Fetching matchups data...")
 try:

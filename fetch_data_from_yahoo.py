@@ -242,191 +242,133 @@ if all_matchup_records:
 # ==================== TRANSACTIONS ====================
 print("\n=== FETCHING TRANSACTIONS ===")
 all_transactions = []
-seen_trans_players = set()
+seen_trans_players = set()  # Track (transaction_id, player_id) to avoid duplicates
 
 for trans_type in ['add', 'drop', 'trade']:
     try:
         print(f"Fetching {trans_type}...", end=" ")
         
-        start = 0
-        count_per_call = 100
+        # Yahoo API typically limits to max ~1000 transactions per type
+        # Try increasing the count to get more
+        trans_list = lg.transactions(trans_type, 1000)
         
-        while True:
-            try:
-                response = sc.session.get(
-                    f"https://fantasysports.yahooapis.com/fantasy/v2/league/{league_id}/transactions",
-                    params={
-                        'format': 'json',
-                        'types': trans_type,
-                        'count': count_per_call,
-                        'start': start
-                    }
-                )
-                
-                data = response.json()
-                
-                # Debug first call
-                if start == 0 and trans_type == 'add':
-                    print(f"\nDEBUG: Response keys: {data.keys() if isinstance(data, dict) else 'not dict'}")
-                    if 'fantasy_content' in data:
-                        fc = data['fantasy_content']
-                        print(f"DEBUG: fantasy_content keys: {fc.keys() if isinstance(fc, dict) else 'not dict'}")
-                        if 'league' in fc:
-                            print(f"DEBUG: league type: {type(fc['league'])}")
-                            if isinstance(fc['league'], list):
-                                print(f"DEBUG: league length: {len(fc['league'])}")
-                                for idx, item in enumerate(fc['league']):
+        print(f"(Got {len(trans_list) if trans_list else 0} from API)...", end=" ")
+        
+        for trans in trans_list:
+            if not isinstance(trans, dict):
+                continue
+            
+            trans_key = trans.get('transaction_key', '')
+            trans_id = trans.get('transaction_id', '')
+            trans_type_val = trans.get('type', trans_type)
+            status = trans.get('status', '')
+            trans_timestamp = trans.get('timestamp', '')
+            
+            players = trans.get('players', {})
+            if isinstance(players, dict):
+                for pkey in players:
+                    if pkey == 'count':
+                        continue
+                    
+                    # Initialize variables
+                    player_id = ''
+                    player_name = ''
+                    dest_team = ''
+                    dest_team_name = ''
+                    source_team = ''
+                    source_team_name = ''
+                    source_type = ''
+                    dest_type = ''
+                    transaction_type = ''
+                    
+                    player_obj = players[pkey]
+                    
+                    if isinstance(player_obj, dict) and 'player' in player_obj:
+                        player_data = player_obj['player']
+                        
+                        # Parse player info from first element
+                        if isinstance(player_data, list) and len(player_data) > 0:
+                            player_info_list = player_data[0]
+                            if isinstance(player_info_list, list):
+                                for item in player_info_list:
                                     if isinstance(item, dict):
-                                        print(f"DEBUG: league[{idx}] keys: {list(item.keys())[:5]}")
-                
-                if 'fantasy_content' not in data:
-                    break
-                
-                content = data['fantasy_content']
-                if 'league' not in content:
-                    break
-                
-                league_data = content['league']
-                found_transactions = False
-                trans_count = 0
-                
-                if isinstance(league_data, list):
-                    for item in league_data:
-                        if isinstance(item, dict) and 'transactions' in item:
-                            transactions = item['transactions']
+                                        if 'player_id' in item:
+                                            player_id = item['player_id']
+                                        if 'name' in item:
+                                            name_obj = item['name']
+                                            if isinstance(name_obj, dict):
+                                                player_name = name_obj.get('full', '')
                             
-                            if isinstance(transactions, dict):
-                                trans_count = transactions.get('count', 0)
-                                
-                                for key in transactions:
-                                    if key == 'count':
-                                        continue
-                                    
-                                    if 'transaction' not in transactions[key]:
-                                        continue
-                                    
-                                    found_transactions = True
-                                    trans = transactions[key]['transaction']
-                                    
-                                    if not isinstance(trans, dict):
-                                        continue
-                                    
-                                    trans_key = trans.get('transaction_key', '')
-                                    trans_id = trans.get('transaction_id', '')
-                                    trans_type_val = trans.get('type', trans_type)
-                                    status = trans.get('status', '')
-                                    trans_timestamp = trans.get('timestamp', '')
-                                    
-                                    players = trans.get('players', {})
-                                    if isinstance(players, dict):
-                                        for pkey in players:
-                                            if pkey == 'count':
-                                                continue
-                                            
-                                            player_id = ''
-                                            player_name = ''
-                                            dest_team = ''
-                                            dest_team_name = ''
-                                            source_team = ''
-                                            source_team_name = ''
-                                            source_type = ''
-                                            dest_type = ''
-                                            transaction_type = ''
-                                            
-                                            player_obj = players[pkey]
-                                            
-                                            if isinstance(player_obj, dict) and 'player' in player_obj:
-                                                player_data = player_obj['player']
-                                                
-                                                if isinstance(player_data, list) and len(player_data) > 0:
-                                                    player_info_list = player_data[0]
-                                                    if isinstance(player_info_list, list):
-                                                        for item in player_info_list:
-                                                            if isinstance(item, dict):
-                                                                if 'player_id' in item:
-                                                                    player_id = item['player_id']
-                                                                if 'name' in item:
-                                                                    name_obj = item['name']
-                                                                    if isinstance(name_obj, dict):
-                                                                        player_name = name_obj.get('full', '')
-                                                    
-                                                    if len(player_data) > 1:
-                                                        trans_data_obj = player_data[1]
-                                                        if isinstance(trans_data_obj, dict) and 'transaction_data' in trans_data_obj:
-                                                            trans_data_list = trans_data_obj['transaction_data']
-                                                            if isinstance(trans_data_list, list) and len(trans_data_list) > 0:
-                                                                trans_data = trans_data_list[0]
-                                                                
-                                                                transaction_type = trans_data.get('type', '')
-                                                                dest_team = trans_data.get('destination_team_key', '')
-                                                                dest_team_name = trans_data.get('destination_team_name', '')
-                                                                source_team = trans_data.get('source_team_key', '')
-                                                                source_team_name = trans_data.get('source_team_name', '')
-                                                                source_type = trans_data.get('source_type', '')
-                                                                dest_type = trans_data.get('destination_type', '')
-                                            
-                                            if not player_name:
-                                                continue
-                                            
-                                            trans_player_key = f"{trans_id}_{player_id}"
-                                            if trans_player_key in seen_trans_players:
-                                                continue
-                                            
-                                            seen_trans_players.add(trans_player_key)
-                                            
-                                            if transaction_type == 'drop' and dest_team and not source_team:
-                                                source_team = dest_team
-                                                source_team_name = dest_team_name
-                                                dest_team = 'waivers'
-                                                dest_team_name = 'Waivers'
-                                                dest_type = 'waivers'
-                                                source_type = 'team'
-                                            
-                                            action = transaction_type
-                                            if not action:
-                                                if trans_type_val == 'drop':
-                                                    action = 'drop'
-                                                elif trans_type_val == 'add':
-                                                    action = 'add'
-                                                elif trans_type_val == 'trade':
-                                                    action = 'trade'
-                                                elif dest_team and source_type == 'freeagents':
-                                                    action = 'add'
-                                                elif source_team and dest_type == 'waivers':
-                                                    action = 'drop'
-                                            
-                                            all_transactions.append({
-                                                'transaction_key': trans_key,
-                                                'transaction_id': trans_id,
-                                                'type': trans_type_val,
-                                                'player_action': action,
-                                                'status': status,
-                                                'timestamp': trans_timestamp,
-                                                'player_id': player_id,
-                                                'player_name': player_name,
-                                                'destination_team_key': dest_team if dest_team else None,
-                                                'destination_team_name': dest_team_name if dest_team_name else None,
-                                                'source_team_key': source_team if source_team else None,
-                                                'source_team_name': source_team_name if source_team_name else None,
-                                                'source_type': source_type if source_type else None,
-                                                'destination_type': dest_type if dest_type else None,
-                                                'extracted_at': timestamp,
-                                                'league_id': league_id
-                                            })
-                
-                if not found_transactions or trans_count < count_per_call:
-                    break
-                
-                start += count_per_call
-                time.sleep(0.5)
-                
-            except Exception as e:
-                print(f"Error at start={start}: {e}")
-                import traceback
-                traceback.print_exc()
-                break
+                            # Parse transaction_data from second element
+                            if len(player_data) > 1:
+                                trans_data_obj = player_data[1]
+                                if isinstance(trans_data_obj, dict) and 'transaction_data' in trans_data_obj:
+                                    trans_data_list = trans_data_obj['transaction_data']
+                                    if isinstance(trans_data_list, list) and len(trans_data_list) > 0:
+                                        trans_data = trans_data_list[0]
+                                        
+                                        transaction_type = trans_data.get('type', '')
+                                        dest_team = trans_data.get('destination_team_key', '')
+                                        dest_team_name = trans_data.get('destination_team_name', '')
+                                        source_team = trans_data.get('source_team_key', '')
+                                        source_team_name = trans_data.get('source_team_name', '')
+                                        source_type = trans_data.get('source_type', '')
+                                        dest_type = trans_data.get('destination_type', '')
+                    
+                    # Skip if no player name or if we've seen this transaction+player combo
+                    if not player_name:
+                        continue
+                    
+                    trans_player_key = f"{trans_id}_{player_id}"
+                    if trans_player_key in seen_trans_players:
+                        continue
+                    
+                    seen_trans_players.add(trans_player_key)
+                    
+                    # Fix drop transactions - Yahoo puts the dropping team in destination field
+                    if transaction_type == 'drop' and dest_team and not source_team:
+                        source_team = dest_team
+                        source_team_name = dest_team_name
+                        dest_team = 'waivers'
+                        dest_team_name = 'Waivers'
+                        dest_type = 'waivers'
+                        source_type = 'team'
+                    
+                    # Infer action
+                    action = transaction_type
+                    if not action:
+                        if trans_type_val == 'drop':
+                            action = 'drop'
+                        elif trans_type_val == 'add':
+                            action = 'add'
+                        elif trans_type_val == 'trade':
+                            action = 'trade'
+                        elif dest_team and source_type == 'freeagents':
+                            action = 'add'
+                        elif source_team and dest_type == 'waivers':
+                            action = 'drop'
+                    
+                    all_transactions.append({
+                        'transaction_key': trans_key,
+                        'transaction_id': trans_id,
+                        'type': trans_type_val,
+                        'player_action': action,
+                        'status': status,
+                        'timestamp': trans_timestamp,
+                        'player_id': player_id,
+                        'player_name': player_name,
+                        'destination_team_key': dest_team if dest_team else None,
+                        'destination_team_name': dest_team_name if dest_team_name else None,
+                        'source_team_key': source_team if source_team else None,
+                        'source_team_name': source_team_name if source_team_name else None,
+                        'source_type': source_type if source_type else None,
+                        'destination_type': dest_type if dest_type else None,
+                        'extracted_at': timestamp,
+                        'league_id': league_id
+                    })
         
-        print(f"✓ {len([t for t in all_transactions if t['type'] == trans_type])} records")
+        unique_count = len([t for t in all_transactions if t['type'] == trans_type])
+        print(f"✓ {unique_count} unique records")
         time.sleep(2)
         
     except Exception as e:
@@ -444,7 +386,7 @@ if all_transactions:
     job.result()
     print(f"Loaded {len(df_trans)} transactions!")
 else:
-    print("No transactions collected")
+    print("⚠️ No transactions collected")
     
 # ==================== ROSTERS ====================
 print("\n=== FETCHING ROSTERS ===")

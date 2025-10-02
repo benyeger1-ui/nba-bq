@@ -264,7 +264,7 @@ for trans_type in ['add', 'drop', 'trade']:
                     if pkey == 'count':
                         continue
                     
-                    # Initialize variables here at the right scope
+                    # Initialize variables
                     player_id = ''
                     player_name = ''
                     dest_team = ''
@@ -272,6 +272,7 @@ for trans_type in ['add', 'drop', 'trade']:
                     source_team = ''
                     source_team_name = ''
                     source_type = ''
+                    transaction_type = ''  # Specific type for this player
                     
                     player_obj = players[pkey]
                     
@@ -298,35 +299,41 @@ for trans_type in ['add', 'drop', 'trade']:
                                     trans_data_list = trans_data_obj['transaction_data']
                                     if isinstance(trans_data_list, list) and len(trans_data_list) > 0:
                                         trans_data = trans_data_list[0]
+                                        
+                                        # Get the specific type for THIS player
+                                        transaction_type = trans_data.get('type', trans_type_val)
+                                        
                                         dest_team = trans_data.get('destination_team_key', '')
                                         dest_team_name = trans_data.get('destination_team_name', '')
                                         source_team = trans_data.get('source_team_key', '')
                                         source_team_name = trans_data.get('source_team_name', '')
                                         source_type = trans_data.get('source_type', '')
-                        
-                        # For drops, swap source and destination
-                        if trans_type_val in ['drop', 'add/drop'] and dest_team and not source_team:
-                            source_team = dest_team
-                            source_team_name = dest_team_name
-                            dest_team = ''
-                            dest_team_name = ''
+                                        
+                                        # Handle destination_type for drops
+                                        dest_type = trans_data.get('destination_type', '')
+                                        if dest_type == 'waivers':
+                                            dest_team = 'waivers'
+                                            dest_team_name = 'Waivers'
                     
-                    all_transactions.append({
-                        'transaction_key': trans_key,
-                        'transaction_id': trans_id,
-                        'type': trans_type_val,
-                        'status': status,
-                        'timestamp': trans_timestamp,
-                        'player_id': player_id,
-                        'player_name': player_name,
-                        'destination_team_key': dest_team if dest_team else None,
-                        'destination_team_name': dest_team_name if dest_team_name else None,
-                        'source_team_key': source_team if source_team else None,
-                        'source_team_name': source_team_name if source_team_name else None,
-                        'source_type': source_type if source_type else None,
-                        'extracted_at': timestamp,
-                        'league_id': league_id
-                    })
+                    # Only add if we got a player name
+                    if player_name:
+                        all_transactions.append({
+                            'transaction_key': trans_key,
+                            'transaction_id': trans_id,
+                            'type': trans_type_val,  # Overall transaction type
+                            'player_transaction_type': transaction_type,  # Specific type for this player
+                            'status': status,
+                            'timestamp': trans_timestamp,
+                            'player_id': player_id,
+                            'player_name': player_name,
+                            'destination_team_key': dest_team if dest_team else None,
+                            'destination_team_name': dest_team_name if dest_team_name else None,
+                            'source_team_key': source_team if source_team else None,
+                            'source_team_name': source_team_name if source_team_name else None,
+                            'source_type': source_type if source_type else None,
+                            'extracted_at': timestamp,
+                            'league_id': league_id
+                        })
         
         print(f"✓ {len([t for t in all_transactions if t['type'] == trans_type])} records")
         time.sleep(2)
@@ -339,12 +346,13 @@ for trans_type in ['add', 'drop', 'trade']:
 if all_transactions:
     df_trans = pd.DataFrame(all_transactions)
     print(f"\nSample transactions:")
-    print(df_trans[['type', 'player_name', 'destination_team_name', 'source_type']].head(10))
+    print(df_trans[['type', 'player_transaction_type', 'player_name', 'destination_team_name', 'source_team_name']].head(15))
     
     table_id = f"{project_id}.{dataset}.transactions"
     job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE", autodetect=True)
     job = client.load_table_from_dataframe(df_trans, table_id, job_config=job_config)
     job.result()
     print(f"Loaded {len(df_trans)} transactions!")
+    
     
 print("\n=== COMPLETE ===")

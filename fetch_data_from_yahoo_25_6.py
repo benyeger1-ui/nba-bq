@@ -247,7 +247,12 @@ seen_trans_players = set()  # Track (transaction_id, player_id) to avoid duplica
 for trans_type in ['add', 'drop', 'trade']:
     try:
         print(f"Fetching {trans_type}...", end=" ")
-        trans_list = lg.transactions(trans_type, 500)
+        
+        # Yahoo API typically limits to max ~1000 transactions per type
+        # Try increasing the count to get more
+        trans_list = lg.transactions(trans_type, 1000)
+        
+        print(f"(Got {len(trans_list) if trans_list else 0} from API)...", end=" ")
         
         for trans in trans_list:
             if not isinstance(trans, dict):
@@ -362,7 +367,8 @@ for trans_type in ['add', 'drop', 'trade']:
                         'league_id': league_id
                     })
         
-        print(f"✓ {len([t for t in all_transactions if t['type'] == trans_type])} records")
+        unique_count = len([t for t in all_transactions if t['type'] == trans_type])
+        print(f"✓ {unique_count} unique records")
         time.sleep(2)
         
     except Exception as e:
@@ -373,15 +379,15 @@ for trans_type in ['add', 'drop', 'trade']:
 if all_transactions:
     df_trans = pd.DataFrame(all_transactions)
     print(f"\nTotal unique transactions: {len(df_trans)}")
-    print(f"\nSample:")
-    print(df_trans[['transaction_id', 'type', 'player_action', 'player_name', 'destination_team_name', 'source_team_name']].head(20))
     
     table_id = f"{project_id}.{dataset}.transactions"
     job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE", autodetect=True)
     job = client.load_table_from_dataframe(df_trans, table_id, job_config=job_config)
     job.result()
     print(f"Loaded {len(df_trans)} transactions!")
-
+else:
+    print("⚠️ No transactions collected")
+    
 
 # ==================== ROSTERS ====================
 print("\n=== FETCHING ROSTERS ===")

@@ -77,7 +77,7 @@ try:
     df_standings['league_id'] = league_id
     
     table_id = f"{project_id}.{dataset}.standings"
-    job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND", autodetect=True)
+    job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE", autodetect=True)
     job = client.load_table_from_dataframe(df_standings, table_id, job_config=job_config)
     job.result()
     print(f"Loaded {len(df_standings)} teams!")
@@ -415,7 +415,7 @@ try:
         df_players = pd.DataFrame(player_records)
         
         table_id = f"{project_id}.{dataset}.rosters"
-        job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND", autodetect=True)
+        job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE", autodetect=True)
         job = client.load_table_from_dataframe(df_players, table_id, job_config=job_config)
         job.result()
         print(f"Loaded {len(df_players)} rostered players!")
@@ -505,7 +505,7 @@ try:
         print(f"Collected {len(df_all_players)} unique players")
         
         table_id = f"{project_id}.{dataset}.player_pool"
-        job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND", autodetect=True)
+        job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE", autodetect=True)
         job = client.load_table_from_dataframe(df_all_players, table_id, job_config=job_config)
         job.result()
         print(f"Loaded {len(df_all_players)} players to pool!")

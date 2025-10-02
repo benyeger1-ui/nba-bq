@@ -26,7 +26,7 @@ lg = league.League(sc, league_id)
 print("✅ Found your league!")
 
 # Get dataset name
-dataset = os.environ.get('BQ_DATASET_NBA_YAHOO')
+dataset = os.environ.get('BQ_DATASET_NBA_YAHOO', 'nba_yahoo')
 timestamp = datetime.now()
 
 # ==================== STANDINGS ====================

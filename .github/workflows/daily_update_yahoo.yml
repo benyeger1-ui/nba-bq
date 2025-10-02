@@ -1,10 +1,9 @@
-name: Daily Fantasy Data Update yahoo
+name: Daily Fantasy Data Update
 
 on:
   schedule:
-    # Runs every day at 6 AM UTC (adjust as needed)
     - cron: '0 6 * * *'
-  workflow_dispatch:  # Allows manual trigger
+  workflow_dispatch:
 
 jobs:
   fetch-data:
@@ -30,6 +29,7 @@ jobs:
         BQ_DATASET: ${{ secrets.BQ_DATASET }}
         YAHOO_CLIENT_ID: ${{ secrets.YAHOO_CLIENT_ID }}
         YAHOO_CLIENT_SECRET: ${{ secrets.YAHOO_CLIENT_SECRET }}
+        YAHOO_OAUTH_TOKEN: ${{ secrets.YAHOO_OAUTH_TOKEN }}
       run: |
         python setup_credentials.py
         python create_oauth.py
@@ -39,7 +39,6 @@ jobs:
         GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
         GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
         BQ_DATASET: ${{ secrets.BQ_DATASET }}
-        YAHOO_CLIENT_ID: ${{ secrets.YAHOO_CLIENT_ID }}
-        YAHOO_CLIENT_SECRET: ${{ secrets.YAHOO_CLIENT_SECRET }}
+        YAHOO_OAUTH_TOKEN: ${{ secrets.YAHOO_OAUTH_TOKEN }}
       run: |
         python fetch_data.py

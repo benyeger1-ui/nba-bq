@@ -525,7 +525,7 @@ try:
     # Fetch all players with their rankings
     print(f"Fetching player rankings...", end=" ")
     
-    for start in range(0, 300, 25):  # Get top 300 players
+    for start in range(0, 600, 25):  # Get top 300 players
         try:
             response = sc.session.get(
                 f"https://fantasysports.yahooapis.com/fantasy/v2/league/{league_id}/players",

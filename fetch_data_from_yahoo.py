@@ -263,46 +263,88 @@ except Exception as e:
 # ==================== ALL AVAILABLE PLAYERS (PLAYER POOL) ====================
 print("\n=== FETCHING PLAYER POOL ===")
 try:
-    # Get free agents (available players)
-    free_agents = lg.free_agents('PG')  # Position filter, try different ones
-    
     all_players = []
-    positions = ['PG', 'SG', 'SF', 'PF', 'C', 'G', 'F', 'UTIL']
+    positions = ['PG', 'SG', 'SF', 'PF', 'C']
     
     for pos in positions:
         print(f"Fetching {pos} players...")
         try:
+            # Get free agents by position (limit to 50 per position)
             players = lg.free_agents(pos)
-            for player in players:
-                if isinstance(player, dict):
+            
+            if isinstance(players, list):
+                for player in players:
+                    # Handle if player is a dict directly
+                    if isinstance(player, dict):
+                        player_data = player
+                    # Handle if player is wrapped in a list structure
+                    elif isinstance(player, list):
+                        player_data = {}
+                        for item in player:
+                            if isinstance(item, dict):
+                                player_data.update(item)
+                    else:
+                        continue
+                    
+                    # Extract player information
+                    player_id = player_data.get('player_id', '')
+                    player_name = ''
+                    if 'name' in player_data:
+                        name_field = player_data['name']
+                        if isinstance(name_field, dict):
+                            player_name = name_field.get('full', '')
+                        else:
+                            player_name = str(name_field)
+                    
+                    # Get ownership info
+                    ownership = player_data.get('ownership', {})
+                    ownership_type = 'available'
+                    if isinstance(ownership, dict):
+                        ownership_type = ownership.get('ownership_type', 'available')
+                    
+                    # Get percent owned
+                    percent_owned = 0
+                    if 'percent_owned' in player_data:
+                        po = player_data['percent_owned']
+                        if isinstance(po, dict):
+                            percent_owned = float(po.get('value', 0))
+                        else:
+                            percent_owned = float(po) if po else 0
+                    
                     all_players.append({
-                        'player_id': player.get('player_id', ''),
-                        'player_name': player.get('name', ''),
-                        'position': player.get('position_type', ''),
-                        'status': player.get('status', ''),
-                        'nba_team': player.get('editorial_team_abbr', ''),
-                        'ownership_type': player.get('ownership', {}).get('ownership_type', 'available'),
-                        'percent_owned': player.get('percent_owned', {}).get('value', 0),
+                        'player_id': player_id,
+                        'player_name': player_name,
+                        'position': player_data.get('position_type', pos),
+                        'status': player_data.get('status', ''),
+                        'nba_team': player_data.get('editorial_team_abbr', ''),
+                        'ownership_type': ownership_type,
+                        'percent_owned': percent_owned,
                         'extracted_at': timestamp,
                         'league_id': league_id
                     })
-            time.sleep(0.5)
+            
+            time.sleep(0.5)  # Rate limiting
         except Exception as e:
             print(f"Error fetching {pos}: {e}")
+            import traceback
+            traceback.print_exc()
     
     if all_players:
         df_all_players = pd.DataFrame(all_players).drop_duplicates(subset=['player_id'])
+        print(f"Collected {len(df_all_players)} unique players")
         
         table_id = f"{project_id}.{dataset}.player_pool"
         job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND", autodetect=True)
         job = client.load_table_from_dataframe(df_all_players, table_id, job_config=job_config)
         job.result()
         print(f"Loaded {len(df_all_players)} players to pool!")
+    else:
+        print("No players collected for pool")
 except Exception as e:
     print(f"Error with player pool: {e}")
     import traceback
     traceback.print_exc()
-
+    
 print("\n=== ALL DONE ===")
 print(f"Tables updated:")
 print(f"  - {project_id}.{dataset}.standings")

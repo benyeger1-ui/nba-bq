@@ -320,23 +320,34 @@ for trans_type in ['add', 'drop', 'trade']:
                     
                     seen_trans_players.add(trans_player_key)
                     
-                    # Infer action based on destination/source
+                    # Fix drop transactions - Yahoo puts the dropping team in destination field
+                    if transaction_type == 'drop' and dest_team and not source_team:
+                        source_team = dest_team
+                        source_team_name = dest_team_name
+                        dest_team = 'waivers'
+                        dest_team_name = 'Waivers'
+                        dest_type = 'waivers'
+                        source_type = 'team'
+                    
+                    # Infer action
                     action = transaction_type
                     if not action:
-                        if dest_team and not source_team:
-                            action = 'add'
-                        elif source_team and not dest_team:
+                        if trans_type_val == 'drop':
                             action = 'drop'
-                        elif source_type == 'freeagents':
+                        elif trans_type_val == 'add':
                             action = 'add'
-                        elif dest_type == 'waivers':
+                        elif trans_type_val == 'trade':
+                            action = 'trade'
+                        elif dest_team and source_type == 'freeagents':
+                            action = 'add'
+                        elif source_team and dest_type == 'waivers':
                             action = 'drop'
                     
                     all_transactions.append({
                         'transaction_key': trans_key,
                         'transaction_id': trans_id,
                         'type': trans_type_val,
-                        'player_action': action,  # What happened to THIS player
+                        'player_action': action,
                         'status': status,
                         'timestamp': trans_timestamp,
                         'player_id': player_id,
@@ -369,8 +380,8 @@ if all_transactions:
     job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE", autodetect=True)
     job = client.load_table_from_dataframe(df_trans, table_id, job_config=job_config)
     job.result()
-    print(f"Loaded {len(df_trans)} transactions!")    
-
+    print(f"Loaded {len(df_trans)} transactions!")
+    
 # ==================== ROSTERS ====================
 print("\n=== FETCHING ROSTERS ===")
 try:

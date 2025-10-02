@@ -38,7 +38,7 @@ jobs:
       env:
         GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
         GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
-        BQ_DATASET: ${{ secrets.BQ_DATASET }}
+        BQ_DATASET_NBA_YAHOO: ${{ secrets.BQ_DATASET_NBA_YAHOO }}
         YAHOO_OAUTH_TOKEN: ${{ secrets.YAHOO_OAUTH_TOKEN }}
       run: |
         python fetch_data_from_yahoo.py

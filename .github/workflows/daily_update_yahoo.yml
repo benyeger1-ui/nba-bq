@@ -1,4 +1,4 @@
-name: Daily Fantasy Data Update
+name: Daily Fantasy Data Update Yahoo
 
 on:
   schedule:

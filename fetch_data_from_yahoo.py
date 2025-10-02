@@ -75,7 +75,7 @@ try:
 except Exception as e:
     print(f"Error with standings: {e}")
 
-# ==================== ALL MATCHUPS WITH DETAILED STATS ====================
+# ==================== ALL MATCHUPS WITH STATS ====================
 print("\n=== FETCHING ALL MATCHUPS (HISTORICAL) ===")
 all_matchup_records = []
 
@@ -94,161 +94,162 @@ for week in range(start_week, min(current_week + 1, end_week + 1)):
                             matchups = scoreboard['0']['matchups']
                             
                             for key in matchups:
-                                if key != 'count' and 'matchup' in matchups[key]:
-                                    matchup = matchups[key]['matchup']
-                                    teams_data = matchup.get('0', {}).get('teams', {})
-                                    team1_list = teams_data.get('0', {}).get('team', [[]])[0]
-                                    # Add this right after: team1_list = teams_data.get('0', {}).get('team', [[]])[0]
-                                    if week == 1 and key == '0':  # Debug first matchup only
-                                        print("\n=== DEBUG TEAM1 STRUCTURE ===")
-                                        for idx, item in enumerate(team1_list):
-                                            print(f"Item {idx}: {type(item)}")
-                                            if isinstance(item, dict):
-                                                print(f"  Keys: {list(item.keys())[:10]}")  # First 10 keys
-                                                if 'team_points' in item:
-                                                    print(f"  team_points: {item['team_points']}")
-                                                if 'team_stats' in item:
-                                                    print(f"  team_stats keys: {list(item['team_stats'].keys()) if isinstance(item['team_stats'], dict) else 'not a dict'}")
-                                    team2_list = teams_data.get('1', {}).get('team', [[]])[0]
+                                if key == 'count':
+                                    continue
                                     
-                                    # Parse team 1
-                                    team1_key = ''
-                                    team1_name = ''
-                                    team1_points = 0
-                                    team1_stats_dict = {}
+                                if 'matchup' not in matchups[key]:
+                                    continue
                                     
+                                matchup = matchups[key]['matchup']
+                                
+                                # Get teams container
+                                teams_container = matchup.get('0', {})
+                                if 'teams' not in teams_container:
+                                    continue
+                                
+                                teams = teams_container['teams']
+                                team1_data = teams.get('0', {}).get('team', [[]])
+                                team2_data = teams.get('1', {}).get('team', [[]])
+                                
+                                # Parse team 1
+                                team1_info = {}
+                                team1_stats = {}
+                                team1_points = 0
+                                
+                                if isinstance(team1_data, list) and len(team1_data) > 0:
+                                    team1_list = team1_data[0]
                                     for item in team1_list:
                                         if isinstance(item, dict):
-                                            if 'team_key' in item:
-                                                team1_key = item['team_key']
-                                            if 'name' in item:
-                                                team1_name = item['name']
-                                            if 'team_points' in item:
-                                                tp = item['team_points']
-                                                if isinstance(tp, dict):
-                                                    team1_points = float(tp.get('total', 0))
-                                                else:
-                                                    team1_points = float(tp) if tp else 0
-                                            if 'team_stats' in item:
-                                                stats = item['team_stats']
-                                                if isinstance(stats, dict) and 'stats' in stats:
-                                                    for stat in stats['stats']:
-                                                        if isinstance(stat, dict) and 'stat' in stat:
-                                                            s = stat['stat']
-                                                            sid = s.get('stat_id', '')
-                                                            sval = s.get('value', '')
-                                                            stat_map = {
-                                                                '5': 'fg_pct', '8': 'ft_pct', '10': 'threes',
-                                                                '12': 'pts', '15': 'reb', '16': 'ast',
-                                                                '17': 'stl', '18': 'blk', '19': 'to'
-                                                            }
-                                                            if sid in stat_map:
-                                                                team1_stats_dict[stat_map[sid]] = sval
-                                    
-                                    # Parse team 2
-                                    team2_key = ''
-                                    team2_name = ''
-                                    team2_points = 0
-                                    team2_stats_dict = {}
-                                    
+                                            team1_info.update(item)
+                                
+                                # Check if stats are in the second element
+                                if isinstance(team1_data, list) and len(team1_data) > 1:
+                                    team1_stats_data = team1_data[1]
+                                    if isinstance(team1_stats_data, dict):
+                                        if 'team_stats' in team1_stats_data:
+                                            stats_obj = team1_stats_data['team_stats']
+                                            if isinstance(stats_obj, dict) and 'stats' in stats_obj:
+                                                for stat in stats_obj['stats']:
+                                                    if isinstance(stat, dict) and 'stat' in stat:
+                                                        s = stat['stat']
+                                                        sid = s.get('stat_id', '')
+                                                        sval = s.get('value', '')
+                                                        stat_map = {
+                                                            '5': 'fg_pct', '8': 'ft_pct', '10': 'threes',
+                                                            '12': 'pts', '15': 'reb', '16': 'ast',
+                                                            '17': 'stl', '18': 'blk', '19': 'to'
+                                                        }
+                                                        if sid in stat_map:
+                                                            team1_stats[stat_map[sid]] = sval
+                                        
+                                        if 'team_points' in team1_stats_data:
+                                            tp = team1_stats_data['team_points']
+                                            if isinstance(tp, dict):
+                                                team1_points = float(tp.get('total', 0))
+                                
+                                # Parse team 2
+                                team2_info = {}
+                                team2_stats = {}
+                                team2_points = 0
+                                
+                                if isinstance(team2_data, list) and len(team2_data) > 0:
+                                    team2_list = team2_data[0]
                                     for item in team2_list:
                                         if isinstance(item, dict):
-                                            if 'team_key' in item:
-                                                team2_key = item['team_key']
-                                            if 'name' in item:
-                                                team2_name = item['name']
-                                            if 'team_points' in item:
-                                                tp = item['team_points']
-                                                if isinstance(tp, dict):
-                                                    team2_points = float(tp.get('total', 0))
-                                                else:
-                                                    team2_points = float(tp) if tp else 0
-                                            if 'team_stats' in item:
-                                                stats = item['team_stats']
-                                                if isinstance(stats, dict) and 'stats' in stats:
-                                                    for stat in stats['stats']:
-                                                        if isinstance(stat, dict) and 'stat' in stat:
-                                                            s = stat['stat']
-                                                            sid = s.get('stat_id', '')
-                                                            sval = s.get('value', '')
-                                                            stat_map = {
-                                                                '5': 'fg_pct', '8': 'ft_pct', '10': 'threes',
-                                                                '12': 'pts', '15': 'reb', '16': 'ast',
-                                                                '17': 'stl', '18': 'blk', '19': 'to'
-                                                            }
-                                                            if sid in stat_map:
-                                                                team2_stats_dict[stat_map[sid]] = sval
-                                    
-                                    # Get category winners
-                                    stat_winners = matchup.get('stat_winners', [])
-                                    winners_dict = {}
-                                    if isinstance(stat_winners, list):
-                                        for sw in stat_winners:
-                                            if isinstance(sw, dict) and 'stat_winner' in sw:
-                                                w = sw['stat_winner']
-                                                sid = w.get('stat_id', '')
-                                                wkey = w.get('winner_team_key', '')
-                                                stat_map = {
-                                                    '5': 'fg_pct', '8': 'ft_pct', '10': 'threes',
-                                                    '12': 'pts', '15': 'reb', '16': 'ast',
-                                                    '17': 'stl', '18': 'blk', '19': 'to'
-                                                }
-                                                if sid in stat_map:
-                                                    winners_dict[f'winner_{stat_map[sid]}'] = wkey
-                                    
-                                    all_matchup_records.append({
-                                        'week': matchup.get('week', week),
-                                        'week_start': matchup.get('week_start', ''),
-                                        'week_end': matchup.get('week_end', ''),
-                                        'status': matchup.get('status', ''),
-                                        'is_playoffs': matchup.get('is_playoffs', '0'),
-                                        'winner_team_key': matchup.get('winner_team_key', ''),
-                                        'team1_key': team1_key,
-                                        'team1_name': team1_name,
-                                        'team1_points': team1_points,
-                                        'team1_fg_pct': team1_stats_dict.get('fg_pct', ''),
-                                        'team1_ft_pct': team1_stats_dict.get('ft_pct', ''),
-                                        'team1_threes': team1_stats_dict.get('threes', ''),
-                                        'team1_pts': team1_stats_dict.get('pts', ''),
-                                        'team1_reb': team1_stats_dict.get('reb', ''),
-                                        'team1_ast': team1_stats_dict.get('ast', ''),
-                                        'team1_stl': team1_stats_dict.get('stl', ''),
-                                        'team1_blk': team1_stats_dict.get('blk', ''),
-                                        'team1_to': team1_stats_dict.get('to', ''),
-                                        'team2_key': team2_key,
-                                        'team2_name': team2_name,
-                                        'team2_points': team2_points,
-                                        'team2_fg_pct': team2_stats_dict.get('fg_pct', ''),
-                                        'team2_ft_pct': team2_stats_dict.get('ft_pct', ''),
-                                        'team2_threes': team2_stats_dict.get('threes', ''),
-                                        'team2_pts': team2_stats_dict.get('pts', ''),
-                                        'team2_reb': team2_stats_dict.get('reb', ''),
-                                        'team2_ast': team2_stats_dict.get('ast', ''),
-                                        'team2_stl': team2_stats_dict.get('stl', ''),
-                                        'team2_blk': team2_stats_dict.get('blk', ''),
-                                        'team2_to': team2_stats_dict.get('to', ''),
-                                        **winners_dict,
-                                        'extracted_at': timestamp,
-                                        'league_id': league_id
-                                    })
+                                            team2_info.update(item)
+                                
+                                if isinstance(team2_data, list) and len(team2_data) > 1:
+                                    team2_stats_data = team2_data[1]
+                                    if isinstance(team2_stats_data, dict):
+                                        if 'team_stats' in team2_stats_data:
+                                            stats_obj = team2_stats_data['team_stats']
+                                            if isinstance(stats_obj, dict) and 'stats' in stats_obj:
+                                                for stat in stats_obj['stats']:
+                                                    if isinstance(stat, dict) and 'stat' in stat:
+                                                        s = stat['stat']
+                                                        sid = s.get('stat_id', '')
+                                                        sval = s.get('value', '')
+                                                        stat_map = {
+                                                            '5': 'fg_pct', '8': 'ft_pct', '10': 'threes',
+                                                            '12': 'pts', '15': 'reb', '16': 'ast',
+                                                            '17': 'stl', '18': 'blk', '19': 'to'
+                                                        }
+                                                        if sid in stat_map:
+                                                            team2_stats[stat_map[sid]] = sval
+                                        
+                                        if 'team_points' in team2_stats_data:
+                                            tp = team2_stats_data['team_points']
+                                            if isinstance(tp, dict):
+                                                team2_points = float(tp.get('total', 0))
+                                
+                                # Get winners
+                                stat_winners = matchup.get('stat_winners', [])
+                                winners = {}
+                                if isinstance(stat_winners, list):
+                                    for sw in stat_winners:
+                                        if isinstance(sw, dict) and 'stat_winner' in sw:
+                                            w = sw['stat_winner']
+                                            sid = w.get('stat_id', '')
+                                            wkey = w.get('winner_team_key', '')
+                                            stat_map = {
+                                                '5': 'fg_pct', '8': 'ft_pct', '10': 'threes',
+                                                '12': 'pts', '15': 'reb', '16': 'ast',
+                                                '17': 'stl', '18': 'blk', '19': 'to'
+                                            }
+                                            if sid in stat_map:
+                                                winners[f'winner_{stat_map[sid]}'] = wkey
+                                
+                                all_matchup_records.append({
+                                    'week': matchup.get('week', week),
+                                    'week_start': matchup.get('week_start', ''),
+                                    'week_end': matchup.get('week_end', ''),
+                                    'status': matchup.get('status', ''),
+                                    'is_playoffs': matchup.get('is_playoffs', '0'),
+                                    'winner_team_key': matchup.get('winner_team_key', ''),
+                                    'team1_key': team1_info.get('team_key', ''),
+                                    'team1_name': team1_info.get('name', ''),
+                                    'team1_points': team1_points,
+                                    'team1_fg_pct': team1_stats.get('fg_pct', ''),
+                                    'team1_ft_pct': team1_stats.get('ft_pct', ''),
+                                    'team1_threes': team1_stats.get('threes', ''),
+                                    'team1_pts': team1_stats.get('pts', ''),
+                                    'team1_reb': team1_stats.get('reb', ''),
+                                    'team1_ast': team1_stats.get('ast', ''),
+                                    'team1_stl': team1_stats.get('stl', ''),
+                                    'team1_blk': team1_stats.get('blk', ''),
+                                    'team1_to': team1_stats.get('to', ''),
+                                    'team2_key': team2_info.get('team_key', ''),
+                                    'team2_name': team2_info.get('name', ''),
+                                    'team2_points': team2_points,
+                                    'team2_fg_pct': team2_stats.get('fg_pct', ''),
+                                    'team2_ft_pct': team2_stats.get('ft_pct', ''),
+                                    'team2_threes': team2_stats.get('threes', ''),
+                                    'team2_pts': team2_stats.get('pts', ''),
+                                    'team2_reb': team2_stats.get('reb', ''),
+                                    'team2_ast': team2_stats.get('ast', ''),
+                                    'team2_stl': team2_stats.get('stl', ''),
+                                    'team2_blk': team2_stats.get('blk', ''),
+                                    'team2_to': team2_stats.get('to', ''),
+                                    **winners,
+                                    'extracted_at': timestamp,
+                                    'league_id': league_id
+                                })
         
         time.sleep(0.3)
     except Exception as e:
-        print(f"Error fetching week {week}: {e}")
+        print(f"Error week {week}: {e}")
 
 if all_matchup_records:
     df_matchups = pd.DataFrame(all_matchup_records)
-    print(f"\nTotal matchups: {len(df_matchups)}")
-    print(f"Sample:\n{df_matchups[['week', 'team1_name', 'team1_points', 'team2_name', 'team2_points']].head()}")
+    print(f"\nTotal: {len(df_matchups)}")
+    print(f"Sample:\n{df_matchups[['week', 'team1_name', 'team1_points', 'team1_pts', 'team2_name', 'team2_points']].head()}")
     
     table_id = f"{project_id}.{dataset}.matchups"
-    job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND", autodetect=True)
+    job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE", autodetect=True)
     job = client.load_table_from_dataframe(df_matchups, table_id, job_config=job_config)
     job.result()
     print(f"Loaded {len(df_matchups)} matchups!")
-else:
-    print("No matchups collected")
-
+    
 # ==================== TRANSACTIONS ====================
 print("\n=== FETCHING TRANSACTIONS ===")
 all_transactions = []
@@ -311,6 +312,16 @@ for trans_type in ['add', 'drop', 'trade']:
                                     dest_team = td.get('destination_team_key', '')
                                     source_team = td.get('source_team_key', '')
                         
+                        # Get team names lookup
+                        teams = lg.teams()
+                        team_names = {}
+                        for tk, td in teams.items():
+                            team_names[tk] = td.get('name', '') if isinstance(td, dict) else str(td)
+                        
+                        # Then in the transaction append:
+                        dest_team_name = team_names.get(dest_team, '')
+                        source_team_name = team_names.get(source_team, '')
+                        
                         all_transactions.append({
                             'transaction_key': trans_key,
                             'transaction_id': trans_id,
@@ -320,7 +331,9 @@ for trans_type in ['add', 'drop', 'trade']:
                             'player_id': player_id,
                             'player_name': player_name,
                             'destination_team_key': dest_team,
+                            'destination_team_name': dest_team_name,  # Add this
                             'source_team_key': source_team,
+                            'source_team_name': source_team_name,  # Add this
                             'extracted_at': timestamp,
                             'league_id': league_id
                         })

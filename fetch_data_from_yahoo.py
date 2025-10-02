@@ -21,24 +21,33 @@ print("Connected to BigQuery!")
 print("\nStep 3: Getting your NBA fantasy league...")
 gm = game.Game(sc, 'nba')
 
-# YOUR LEAGUE ID
 league_id = '454.l.21729'  # LAST YEAR
 # league_id = '466.l.52855'  # CURRENT LEAGUE
 lg = league.League(sc, league_id)
 print("Found your league!")
 
-# Get dataset name
 dataset = os.environ.get('BQ_DATASET_NBA_YAHOO')
 timestamp = datetime.now()
 
-# Get league settings
 settings = lg.settings()
 start_week = int(settings.get('start_week', 1))
 end_week = int(settings.get('end_week', 21))
 current_week = lg.current_week()
 
-print(f"\nLeague runs from week {start_week} to week {end_week}")
-print(f"Current week: {current_week}")
+print(f"\nLeague: week {start_week} to {end_week}, current: {current_week}")
+
+# ==================== GET TEAM NAMES FIRST ====================
+print("\n=== FETCHING TEAM INFO ===")
+try:
+    teams = lg.teams()
+    team_names = {}
+    for tk, td in teams.items():
+        team_names[tk] = td.get('name', '') if isinstance(td, dict) else str(td)
+    print(f"Got {len(team_names)} team names")
+    time.sleep(1)  # Rate limit protection
+except Exception as e:
+    print(f"Error getting teams: {e}")
+    team_names = {}
 
 # ==================== STANDINGS ====================
 print("\n=== FETCHING STANDINGS ===")
@@ -71,16 +80,17 @@ try:
     job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND", autodetect=True)
     job = client.load_table_from_dataframe(df_standings, table_id, job_config=job_config)
     job.result()
-    print(f"Loaded {len(df_standings)} teams to standings table!")
+    print(f"Loaded {len(df_standings)} teams!")
+    time.sleep(1)
 except Exception as e:
-    print(f"Error with standings: {e}")
+    print(f"Error: {e}")
 
-# ==================== ALL MATCHUPS WITH STATS ====================
-print("\n=== FETCHING ALL MATCHUPS (HISTORICAL) ===")
+# ==================== MATCHUPS ====================
+print("\n=== FETCHING MATCHUPS ===")
 all_matchup_records = []
 
 for week in range(start_week, min(current_week + 1, end_week + 1)):
-    print(f"Fetching week {week}...")
+    print(f"Week {week}...", end=" ")
     try:
         matchups_data = lg.matchups(week=week)
         
@@ -96,13 +106,10 @@ for week in range(start_week, min(current_week + 1, end_week + 1)):
                             for key in matchups:
                                 if key == 'count':
                                     continue
-                                    
                                 if 'matchup' not in matchups[key]:
                                     continue
                                     
                                 matchup = matchups[key]['matchup']
-                                
-                                # Get teams container
                                 teams_container = matchup.get('0', {})
                                 if 'teams' not in teams_container:
                                     continue
@@ -116,34 +123,27 @@ for week in range(start_week, min(current_week + 1, end_week + 1)):
                                 team1_stats = {}
                                 team1_points = 0
                                 
-                                if isinstance(team1_data, list) and len(team1_data) > 0:
-                                    team1_list = team1_data[0]
-                                    for item in team1_list:
-                                        if isinstance(item, dict):
-                                            team1_info.update(item)
-                                
-                                # Check if stats are in the second element
-                                if isinstance(team1_data, list) and len(team1_data) > 1:
-                                    team1_stats_data = team1_data[1]
-                                    if isinstance(team1_stats_data, dict):
-                                        if 'team_stats' in team1_stats_data:
-                                            stats_obj = team1_stats_data['team_stats']
+                                if isinstance(team1_data, list):
+                                    if len(team1_data) > 0:
+                                        for item in team1_data[0]:
+                                            if isinstance(item, dict):
+                                                team1_info.update(item)
+                                    
+                                    if len(team1_data) > 1 and isinstance(team1_data[1], dict):
+                                        if 'team_stats' in team1_data[1]:
+                                            stats_obj = team1_data[1]['team_stats']
                                             if isinstance(stats_obj, dict) and 'stats' in stats_obj:
                                                 for stat in stats_obj['stats']:
                                                     if isinstance(stat, dict) and 'stat' in stat:
                                                         s = stat['stat']
                                                         sid = s.get('stat_id', '')
                                                         sval = s.get('value', '')
-                                                        stat_map = {
-                                                            '5': 'fg_pct', '8': 'ft_pct', '10': 'threes',
-                                                            '12': 'pts', '15': 'reb', '16': 'ast',
-                                                            '17': 'stl', '18': 'blk', '19': 'to'
-                                                        }
+                                                        stat_map = {'5': 'fg_pct', '8': 'ft_pct', '10': 'threes', '12': 'pts', '15': 'reb', '16': 'ast', '17': 'stl', '18': 'blk', '19': 'to'}
                                                         if sid in stat_map:
                                                             team1_stats[stat_map[sid]] = sval
                                         
-                                        if 'team_points' in team1_stats_data:
-                                            tp = team1_stats_data['team_points']
+                                        if 'team_points' in team1_data[1]:
+                                            tp = team1_data[1]['team_points']
                                             if isinstance(tp, dict):
                                                 team1_points = float(tp.get('total', 0))
                                 
@@ -152,33 +152,27 @@ for week in range(start_week, min(current_week + 1, end_week + 1)):
                                 team2_stats = {}
                                 team2_points = 0
                                 
-                                if isinstance(team2_data, list) and len(team2_data) > 0:
-                                    team2_list = team2_data[0]
-                                    for item in team2_list:
-                                        if isinstance(item, dict):
-                                            team2_info.update(item)
-                                
-                                if isinstance(team2_data, list) and len(team2_data) > 1:
-                                    team2_stats_data = team2_data[1]
-                                    if isinstance(team2_stats_data, dict):
-                                        if 'team_stats' in team2_stats_data:
-                                            stats_obj = team2_stats_data['team_stats']
+                                if isinstance(team2_data, list):
+                                    if len(team2_data) > 0:
+                                        for item in team2_data[0]:
+                                            if isinstance(item, dict):
+                                                team2_info.update(item)
+                                    
+                                    if len(team2_data) > 1 and isinstance(team2_data[1], dict):
+                                        if 'team_stats' in team2_data[1]:
+                                            stats_obj = team2_data[1]['team_stats']
                                             if isinstance(stats_obj, dict) and 'stats' in stats_obj:
                                                 for stat in stats_obj['stats']:
                                                     if isinstance(stat, dict) and 'stat' in stat:
                                                         s = stat['stat']
                                                         sid = s.get('stat_id', '')
                                                         sval = s.get('value', '')
-                                                        stat_map = {
-                                                            '5': 'fg_pct', '8': 'ft_pct', '10': 'threes',
-                                                            '12': 'pts', '15': 'reb', '16': 'ast',
-                                                            '17': 'stl', '18': 'blk', '19': 'to'
-                                                        }
+                                                        stat_map = {'5': 'fg_pct', '8': 'ft_pct', '10': 'threes', '12': 'pts', '15': 'reb', '16': 'ast', '17': 'stl', '18': 'blk', '19': 'to'}
                                                         if sid in stat_map:
                                                             team2_stats[stat_map[sid]] = sval
                                         
-                                        if 'team_points' in team2_stats_data:
-                                            tp = team2_stats_data['team_points']
+                                        if 'team_points' in team2_data[1]:
+                                            tp = team2_data[1]['team_points']
                                             if isinstance(tp, dict):
                                                 team2_points = float(tp.get('total', 0))
                                 
@@ -191,11 +185,7 @@ for week in range(start_week, min(current_week + 1, end_week + 1)):
                                             w = sw['stat_winner']
                                             sid = w.get('stat_id', '')
                                             wkey = w.get('winner_team_key', '')
-                                            stat_map = {
-                                                '5': 'fg_pct', '8': 'ft_pct', '10': 'threes',
-                                                '12': 'pts', '15': 'reb', '16': 'ast',
-                                                '17': 'stl', '18': 'blk', '19': 'to'
-                                            }
+                                            stat_map = {'5': 'fg_pct', '8': 'ft_pct', '10': 'threes', '12': 'pts', '15': 'reb', '16': 'ast', '17': 'stl', '18': 'blk', '19': 'to'}
                                             if sid in stat_map:
                                                 winners[f'winner_{stat_map[sid]}'] = wkey
                                 
@@ -234,30 +224,29 @@ for week in range(start_week, min(current_week + 1, end_week + 1)):
                                     'extracted_at': timestamp,
                                     'league_id': league_id
                                 })
-        
-        time.sleep(0.3)
+        print("✓")
+        time.sleep(0.5)  # Rate limit protection
     except Exception as e:
-        print(f"Error week {week}: {e}")
+        print(f"✗ {e}")
 
 if all_matchup_records:
     df_matchups = pd.DataFrame(all_matchup_records)
-    print(f"\nTotal: {len(df_matchups)}")
-    print(f"Sample:\n{df_matchups[['week', 'team1_name', 'team1_points', 'team1_pts', 'team2_name', 'team2_points']].head()}")
+    print(f"Total: {len(df_matchups)}")
     
     table_id = f"{project_id}.{dataset}.matchups"
     job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE", autodetect=True)
     job = client.load_table_from_dataframe(df_matchups, table_id, job_config=job_config)
     job.result()
     print(f"Loaded {len(df_matchups)} matchups!")
-    
+
 # ==================== TRANSACTIONS ====================
 print("\n=== FETCHING TRANSACTIONS ===")
 all_transactions = []
 
 for trans_type in ['add', 'drop', 'trade']:
     try:
-        trans_list = lg.transactions(trans_type, 1000)
-        print(f"Processing {len(trans_list)} {trans_type} transactions...")
+        print(f"Fetching {trans_type}...", end=" ")
+        trans_list = lg.transactions(trans_type, 500)  # Reduced from 1000
         
         for trans in trans_list:
             if not isinstance(trans, dict):
@@ -269,7 +258,6 @@ for trans_type in ['add', 'drop', 'trade']:
             status = trans.get('status', '')
             trans_timestamp = trans.get('timestamp', '')
             
-            # Get players involved
             players = trans.get('players', {})
             if isinstance(players, dict):
                 for pkey in players:
@@ -280,7 +268,6 @@ for trans_type in ['add', 'drop', 'trade']:
                     if isinstance(player_obj, dict) and 'player' in player_obj:
                         player_list = player_obj['player']
                         
-                        # Parse player info
                         player_id = ''
                         player_name = ''
                         for pitem in player_list:
@@ -301,7 +288,6 @@ for trans_type in ['add', 'drop', 'trade']:
                                     if isinstance(pname, dict):
                                         player_name = pname.get('full', '')
                         
-                        # Get transaction data
                         trans_data_list = player_obj.get('transaction_data', [])
                         dest_team = ''
                         source_team = ''
@@ -312,13 +298,7 @@ for trans_type in ['add', 'drop', 'trade']:
                                     dest_team = td.get('destination_team_key', '')
                                     source_team = td.get('source_team_key', '')
                         
-                        # Get team names lookup
-                        teams = lg.teams()
-                        team_names = {}
-                        for tk, td in teams.items():
-                            team_names[tk] = td.get('name', '') if isinstance(td, dict) else str(td)
-                        
-                        # Then in the transaction append:
+                        # Map team keys to names
                         dest_team_name = team_names.get(dest_team, '')
                         source_team_name = team_names.get(source_team, '')
                         
@@ -331,158 +311,26 @@ for trans_type in ['add', 'drop', 'trade']:
                             'player_id': player_id,
                             'player_name': player_name,
                             'destination_team_key': dest_team,
-                            'destination_team_name': dest_team_name,  # Add this
+                            'destination_team_name': dest_team_name,
                             'source_team_key': source_team,
-                            'source_team_name': source_team_name,  # Add this
+                            'source_team_name': source_team_name,
                             'extracted_at': timestamp,
                             'league_id': league_id
                         })
         
+        print(f"✓ {len([t for t in all_transactions if t['type'] == trans_type])} records")
+        time.sleep(2)  # Longer sleep between transaction types
+        
     except Exception as e:
-        print(f"Error processing {trans_type}: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"✗ {e}")
 
 if all_transactions:
     df_trans = pd.DataFrame(all_transactions)
-    print(f"Total parsed: {len(df_trans)} transaction records")
     
     table_id = f"{project_id}.{dataset}.transactions"
     job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND", autodetect=True)
     job = client.load_table_from_dataframe(df_trans, table_id, job_config=job_config)
     job.result()
     print(f"Loaded {len(df_trans)} transactions!")
-else:
-    print("No transactions parsed")
-# ==================== ROSTERS ====================
-print("\n=== FETCHING ROSTERS ===")
-try:
-    teams = lg.teams()
-    player_records = []
-    
-    for team_key, team_data in teams.items():
-        team_name = team_data.get('name', '') if isinstance(team_data, dict) else str(team_data)
-        
-        try:
-            team_obj = lg.to_team(team_key)
-            roster = team_obj.roster()
-            
-            for player in roster:
-                if isinstance(player, dict):
-                    player_records.append({
-                        'team_key': team_key,
-                        'team_name': team_name,
-                        'player_id': player.get('player_id', ''),
-                        'player_name': player.get('name', ''),
-                        'position': player.get('position_type', ''),
-                        'selected_position': player.get('selected_position', ''),
-                        'status': player.get('status', ''),
-                        'nba_team': player.get('editorial_team_abbr', ''),
-                        'is_rostered': True,
-                        'extracted_at': timestamp,
-                        'league_id': league_id
-                    })
-        except Exception as e:
-            print(f"Error getting roster for {team_key}: {e}")
-    
-    if player_records:
-        df_players = pd.DataFrame(player_records)
-        table_id = f"{project_id}.{dataset}.rosters"
-        job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND", autodetect=True)
-        job = client.load_table_from_dataframe(df_players, table_id, job_config=job_config)
-        job.result()
-        print(f"Loaded {len(df_players)} rostered players!")
-except Exception as e:
-    print(f"Error: {e}")
 
-# ==================== ALL PLAYERS ====================
-print("\n=== FETCHING COMPLETE PLAYER POOL ===")
-try:
-    all_players_list = []
-    
-    # Fetch in batches
-    for start in range(0, 1000, 25):  # Get up to 1000 players in batches of 25
-        try:
-            response = sc.session.get(
-                f"https://fantasysports.yahooapis.com/fantasy/v2/league/{league_id}/players",
-                params={'format': 'json', 'start': start, 'count': 25}
-            )
-            data = response.json()
-            
-            found_players = False
-            if 'fantasy_content' in data and 'league' in data['fantasy_content']:
-                league_data = data['fantasy_content']['league']
-                if isinstance(league_data, list):
-                    for item in league_data:
-                        if isinstance(item, dict) and 'players' in item:
-                            players = item['players']
-                            player_count = players.get('count', 0)
-                            
-                            for key in players:
-                                if key == 'count':
-                                    continue
-                                
-                                if 'player' in players[key]:
-                                    found_players = True
-                                    player_list = players[key]['player']
-                                    p = {}
-                                    
-                                    if isinstance(player_list, list):
-                                        for pitem in player_list:
-                                            if isinstance(pitem, list):
-                                                for pi in pitem:
-                                                    if isinstance(pi, dict):
-                                                        p.update(pi)
-                                            elif isinstance(pitem, dict):
-                                                p.update(pitem)
-                                    
-                                    player_name = ''
-                                    if 'name' in p:
-                                        name_field = p['name']
-                                        if isinstance(name_field, dict):
-                                            player_name = name_field.get('full', '')
-                                    
-                                    ownership_type = 'available'
-                                    if 'ownership' in p:
-                                        own = p['ownership']
-                                        if isinstance(own, dict):
-                                            ownership_type = own.get('ownership_type', 'available')
-                                    
-                                    if player_name:  # Only add if we got a name
-                                        all_players_list.append({
-                                            'player_id': p.get('player_id', ''),
-                                            'player_name': player_name,
-                                            'position': p.get('position_type', ''),
-                                            'status': p.get('status', ''),
-                                            'nba_team': p.get('editorial_team_abbr', ''),
-                                            'ownership_type': ownership_type,
-                                            'extracted_at': timestamp,
-                                            'league_id': league_id
-                                        })
-            
-            if not found_players:
-                break  # No more players
-            
-            print(f"Fetched batch starting at {start}, total so far: {len(all_players_list)}")
-            time.sleep(0.3)
-            
-        except Exception as e:
-            print(f"Error at start={start}: {e}")
-            break
-    
-    if all_players_list:
-        df_all_players = pd.DataFrame(all_players_list).drop_duplicates(subset=['player_id'])
-        
-        table_id = f"{project_id}.{dataset}.player_pool"
-        job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND", autodetect=True)
-        job = client.load_table_from_dataframe(df_all_players, table_id, job_config=job_config)
-        job.result()
-        print(f"Loaded {len(df_all_players)} unique players!")
-except Exception as e:
-    print(f"Error: {e}")
-    import traceback
-    traceback.print_exc()
-
-
-print("\n=== ALL DONE ===")
-print(f"Tables updated in {project_id}.{dataset}")
+print("\n=== COMPLETE ===")

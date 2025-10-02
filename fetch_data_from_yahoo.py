@@ -153,27 +153,60 @@ else:
 # ==================== TRANSACTIONS (ADD/DROP HISTORY) ====================
 print("\n=== FETCHING TRANSACTION HISTORY ===")
 try:
-    transactions = lg.transactions('add,drop')
+    # Get transactions with count parameter (max 100 per call)
+    # You may need to paginate for complete history
+    transactions = lg.transactions('add,drop', 100)
     transaction_records = []
     
-    for trans in transactions:
-        if isinstance(trans, dict):
-            transaction_records.append({
-                'transaction_id': trans.get('transaction_id', ''),
-                'type': trans.get('type', ''),
-                'status': trans.get('status', ''),
-                'timestamp': trans.get('timestamp', ''),
-                'player_key': trans.get('player_key', ''),
-                'player_name': trans.get('player_name', ''),
-                'team_key': trans.get('team_key', ''),
-                'team_name': trans.get('team_name', ''),
-                'extracted_at': timestamp,
-                'league_id': league_id
-            })
+    if isinstance(transactions, list):
+        for trans in transactions:
+            if isinstance(trans, dict):
+                # Handle different transaction structures
+                transaction_key = trans.get('transaction_key', '')
+                trans_type = trans.get('type', '')
+                status = trans.get('status', '')
+                timestamp_val = trans.get('timestamp', '')
+                
+                # Get players involved
+                players = trans.get('players', [])
+                if isinstance(players, list):
+                    for player_info in players:
+                        if isinstance(player_info, dict):
+                            player = player_info.get('player', [[]])[0] if 'player' in player_info else {}
+                            transaction_data = player_info.get('transaction_data', [{}])[0] if 'transaction_data' in player_info else {}
+                            
+                            # Extract player details
+                            player_key = ''
+                            player_name = ''
+                            if isinstance(player, list):
+                                for item in player:
+                                    if isinstance(item, dict):
+                                        if 'player_key' in item:
+                                            player_key = item['player_key']
+                                        if 'name' in item:
+                                            player_name = item['name']['full']
+                            
+                            # Extract transaction details
+                            dest_team = transaction_data.get('destination_team_key', '')
+                            source_team = transaction_data.get('source_team_key', '')
+                            trans_type_detail = transaction_data.get('type', trans_type)
+                            
+                            transaction_records.append({
+                                'transaction_key': transaction_key,
+                                'type': trans_type_detail,
+                                'status': status,
+                                'timestamp': timestamp_val,
+                                'player_key': player_key,
+                                'player_name': player_name,
+                                'destination_team_key': dest_team,
+                                'source_team_key': source_team,
+                                'extracted_at': timestamp,
+                                'league_id': league_id
+                            })
     
     if transaction_records:
         df_transactions = pd.DataFrame(transaction_records)
-        print(f"Collected {len(df_transactions)} transactions")
+        print(f"Collected {len(df_transactions)} transaction records")
         
         table_id = f"{project_id}.{dataset}.transactions"
         job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND", autodetect=True)
@@ -186,7 +219,6 @@ except Exception as e:
     print(f"Error with transactions: {e}")
     import traceback
     traceback.print_exc()
-
 # ==================== CURRENT ROSTERS ====================
 print("\n=== FETCHING CURRENT ROSTERS ===")
 try:

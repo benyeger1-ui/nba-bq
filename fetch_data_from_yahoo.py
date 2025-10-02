@@ -242,32 +242,21 @@ if all_matchup_records:
 # ==================== TRANSACTIONS ====================
 print("\n=== FETCHING TRANSACTIONS ===")
 all_transactions = []
-debug_count = 0
 
 for trans_type in ['add', 'drop', 'trade']:
     try:
         print(f"Fetching {trans_type}...", end=" ")
-        trans_list = lg.transactions(trans_type, 100)  # Start with fewer for debugging
+        trans_list = lg.transactions(trans_type, 500)
         
         for trans in trans_list:
             if not isinstance(trans, dict):
                 continue
-            
-            # DEBUG: Print first few complete transactions
-            if debug_count < 2:
-                print(f"\n\n=== FULL TRANSACTION {debug_count + 1} ===")
-                import json
-                print(json.dumps(trans, indent=2, default=str))
-                debug_count += 1
             
             trans_key = trans.get('transaction_key', '')
             trans_id = trans.get('transaction_id', '')
             trans_type_val = trans.get('type', trans_type)
             status = trans.get('status', '')
             trans_timestamp = trans.get('timestamp', '')
-            
-            # NEW: Check if there's team info at transaction level
-            trans_teams = trans.get('teams', {})
             
             players = trans.get('players', {})
             if isinstance(players, dict):
@@ -277,43 +266,68 @@ for trans_type in ['add', 'drop', 'trade']:
                     
                     player_obj = players[pkey]
                     
-                    # Get player info
-                    player_id = ''
-                    player_name = ''
-                    
                     if isinstance(player_obj, dict) and 'player' in player_obj:
-                        player_list = player_obj['player']
+                        player_data = player_obj['player']
                         
-                        for pitem in player_list:
-                            if isinstance(pitem, list):
-                                for pi in pitem:
-                                    if isinstance(pi, dict):
-                                        if 'player_id' in pi:
-                                            player_id = pi['player_id']
-                                        if 'name' in pi:
-                                            pname = pi['name']
-                                            if isinstance(pname, dict):
-                                                player_name = pname.get('full', '')
-                            elif isinstance(pitem, dict):
-                                if 'player_id' in pitem:
-                                    player_id = pitem['player_id']
-                                if 'name' in pitem:
-                                    pname = pitem['name']
-                                    if isinstance(pname, dict):
-                                        player_name = pname.get('full', '')
-                    
-                    all_transactions.append({
-                        'transaction_key': trans_key,
-                        'transaction_id': trans_id,
-                        'type': trans_type_val,
-                        'status': status,
-                        'timestamp': trans_timestamp,
-                        'player_id': player_id,
-                        'player_name': player_name,
-                        'raw_trans_teams': str(trans_teams),  # Debug field
-                        'extracted_at': timestamp,
-                        'league_id': league_id
-                    })
+                        # player_data is a list with 2 elements:
+                        # [0] = list of player info dicts
+                        # [1] = transaction_data dict
+                        
+                        player_id = ''
+                        player_name = ''
+                        dest_team = ''
+                        dest_team_name = ''
+                        source_team = ''
+                        source_type = ''
+                        
+                        # Parse player info from first element
+                        if isinstance(player_data, list) and len(player_data) > 0:
+                            player_info_list = player_data[0]
+                            if isinstance(player_info_list, list):
+                                for item in player_info_list:
+                                    if isinstance(item, dict):
+                                        if 'player_id' in item:
+                                            player_id = item['player_id']
+                                        if 'name' in item:
+                                            name_obj = item['name']
+                                            if isinstance(name_obj, dict):
+                                                player_name = name_obj.get('full', '')
+                            
+                            # Parse transaction_data from second element
+                            if len(player_data) > 1:
+                                trans_data_obj = player_data[1]
+                                if isinstance(trans_data_obj, dict) and 'transaction_data' in trans_data_obj:
+                                    trans_data_list = trans_data_obj['transaction_data']
+                                    if isinstance(trans_data_list, list) and len(trans_data_list) > 0:
+                                        trans_data = trans_data_list[0]
+                                        dest_team = trans_data.get('destination_team_key', '')
+                                        dest_team_name = trans_data.get('destination_team_name', '')
+                                        source_team = trans_data.get('source_team_key', '')
+                                        source_type = trans_data.get('source_type', '')
+                        
+                        # For drops, source is the team dropping
+                        if trans_type_val in ['drop', 'add/drop'] and dest_team and not source_team:
+                            source_team = dest_team
+                            source_team_name = dest_team_name
+                            dest_team = ''
+                            dest_team_name = ''
+                        
+                        all_transactions.append({
+                            'transaction_key': trans_key,
+                            'transaction_id': trans_id,
+                            'type': trans_type_val,
+                            'status': status,
+                            'timestamp': trans_timestamp,
+                            'player_id': player_id,
+                            'player_name': player_name,
+                            'destination_team_key': dest_team if dest_team else None,
+                            'destination_team_name': dest_team_name if dest_team_name else None,
+                            'source_team_key': source_team if source_team else None,
+                            'source_team_name': source_team_name if source_team_name else None,
+                            'source_type': source_type if source_type else None,
+                            'extracted_at': timestamp,
+                            'league_id': league_id
+                        })
         
         print(f"✓ {len([t for t in all_transactions if t['type'] == trans_type])} records")
         time.sleep(2)
@@ -325,11 +339,13 @@ for trans_type in ['add', 'drop', 'trade']:
 
 if all_transactions:
     df_trans = pd.DataFrame(all_transactions)
+    print(f"\nSample transactions:")
+    print(df_trans[['type', 'player_name', 'destination_team_name', 'source_team_name', 'source_type']].head(10))
     
-    table_id = f"{project_id}.{dataset}.transactions_debug"
+    table_id = f"{project_id}.{dataset}.transactions"
     job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE", autodetect=True)
     job = client.load_table_from_dataframe(df_trans, table_id, job_config=job_config)
     job.result()
-    print(f"Loaded {len(df_trans)} transactions to debug table!")
+    print(f"Loaded {len(df_trans)} transactions!")
     
 print("\n=== COMPLETE ===")

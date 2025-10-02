@@ -1,0 +1,44 @@
+name: Daily Fantasy Data Update Yahoo 2025/26 myballs
+
+on:
+  schedule:
+    - cron: '0 6 * * *'  # Fixed: was '0 6 * **', needs 5 fields
+  workflow_dispatch:
+
+jobs:
+  fetch-data:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+    
+    - name: Install dependencies
+      run: |
+        pip install -r requirements.txt
+    
+    - name: Create credential files
+      env:
+        GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+        GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+        BQ_DATASET_NBA_YAHOO_MYBALLS_25_6: ${{ secrets.BQ_DATASET_NBA_YAHOO_MYBALLS_25_6 }}
+        YAHOO_CLIENT_ID: ${{ secrets.YAHOO_CLIENT_ID }}
+        YAHOO_CLIENT_SECRET: ${{ secrets.YAHOO_CLIENT_SECRET }}
+        YAHOO_OAUTH_TOKEN: ${{ secrets.YAHOO_OAUTH_TOKEN }}
+      run: |
+        python setup_credentials.py
+        python create_oauth.py
+    
+    - name: Fetch fantasy data
+      env:
+        GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+        GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+        BQ_DATASET_NBA_YAHOO_MYBALLS_25_6: ${{ secrets.BQ_DATASET_NBA_YAHOO_MYBALLS_25_6 }}
+        YAHOO_OAUTH_TOKEN: ${{ secrets.YAHOO_OAUTH_TOKEN }}
+      run: |
+        python fetch_data_from_yahoo_25_6.py

@@ -264,21 +264,19 @@ for trans_type in ['add', 'drop', 'trade']:
                     if pkey == 'count':
                         continue
                     
+                    # Initialize variables here at the right scope
+                    player_id = ''
+                    player_name = ''
+                    dest_team = ''
+                    dest_team_name = ''
+                    source_team = ''
+                    source_team_name = ''
+                    source_type = ''
+                    
                     player_obj = players[pkey]
                     
                     if isinstance(player_obj, dict) and 'player' in player_obj:
                         player_data = player_obj['player']
-                        
-                        # player_data is a list with 2 elements:
-                        # [0] = list of player info dicts
-                        # [1] = transaction_data dict
-                        
-                        player_id = ''
-                        player_name = ''
-                        dest_team = ''
-                        dest_team_name = ''
-                        source_team = ''
-                        source_type = ''
                         
                         # Parse player info from first element
                         if isinstance(player_data, list) and len(player_data) > 0:
@@ -303,31 +301,32 @@ for trans_type in ['add', 'drop', 'trade']:
                                         dest_team = trans_data.get('destination_team_key', '')
                                         dest_team_name = trans_data.get('destination_team_name', '')
                                         source_team = trans_data.get('source_team_key', '')
+                                        source_team_name = trans_data.get('source_team_name', '')
                                         source_type = trans_data.get('source_type', '')
                         
-                        # For drops, source is the team dropping
+                        # For drops, swap source and destination
                         if trans_type_val in ['drop', 'add/drop'] and dest_team and not source_team:
                             source_team = dest_team
                             source_team_name = dest_team_name
                             dest_team = ''
                             dest_team_name = ''
-                        
-                        all_transactions.append({
-                            'transaction_key': trans_key,
-                            'transaction_id': trans_id,
-                            'type': trans_type_val,
-                            'status': status,
-                            'timestamp': trans_timestamp,
-                            'player_id': player_id,
-                            'player_name': player_name,
-                            'destination_team_key': dest_team if dest_team else None,
-                            'destination_team_name': dest_team_name if dest_team_name else None,
-                            'source_team_key': source_team if source_team else None,
-                            'source_team_name': source_team_name if source_team_name else None,
-                            'source_type': source_type if source_type else None,
-                            'extracted_at': timestamp,
-                            'league_id': league_id
-                        })
+                    
+                    all_transactions.append({
+                        'transaction_key': trans_key,
+                        'transaction_id': trans_id,
+                        'type': trans_type_val,
+                        'status': status,
+                        'timestamp': trans_timestamp,
+                        'player_id': player_id,
+                        'player_name': player_name,
+                        'destination_team_key': dest_team if dest_team else None,
+                        'destination_team_name': dest_team_name if dest_team_name else None,
+                        'source_team_key': source_team if source_team else None,
+                        'source_team_name': source_team_name if source_team_name else None,
+                        'source_type': source_type if source_type else None,
+                        'extracted_at': timestamp,
+                        'league_id': league_id
+                    })
         
         print(f"✓ {len([t for t in all_transactions if t['type'] == trans_type])} records")
         time.sleep(2)
@@ -340,7 +339,7 @@ for trans_type in ['add', 'drop', 'trade']:
 if all_transactions:
     df_trans = pd.DataFrame(all_transactions)
     print(f"\nSample transactions:")
-    print(df_trans[['type', 'player_name', 'destination_team_name', 'source_team_name', 'source_type']].head(10))
+    print(df_trans[['type', 'player_name', 'destination_team_name', 'source_type']].head(10))
     
     table_id = f"{project_id}.{dataset}.transactions"
     job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE", autodetect=True)

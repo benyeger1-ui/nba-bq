@@ -401,13 +401,9 @@ try:
         try:
             team_obj = lg.to_team(team_key)
             
-            # Get roster from the start of the season
-            # Use the league start date
-            if league_start_date:
-                roster = team_obj.roster(day=league_start_date)
-            else:
-                # Fallback to week 1
-                roster = team_obj.roster(week=1)
+            # Get roster from week 1 (beginning of season)
+            # The day parameter doesn't work reliably, use week instead
+            roster = team_obj.roster(week=1)
             
             for player in roster:
                 if isinstance(player, dict):
@@ -420,12 +416,15 @@ try:
                         'selected_position': player.get('selected_position', ''),
                         'status': player.get('status', ''),
                         'nba_team': player.get('editorial_team_abbr', ''),
-                        'roster_date': league_start_date if league_start_date else 'week_1',
+                        'roster_week': 1,
+                        'roster_date': league_start_date,
                         'extracted_at': timestamp,
                         'league_id': league_id
                     })
         except Exception as e:
             print(f"Error getting roster for {team_key}: {e}")
+            import traceback
+            traceback.print_exc()
         
         time.sleep(0.3)
     

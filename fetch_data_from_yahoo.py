@@ -387,7 +387,53 @@ if all_transactions:
     print(f"Loaded {len(df_trans)} transactions!")
 else:
     print("⚠️ No transactions collected")
-    
+
+# ==================== ROSTERS ====================
+print("\n=== FETCHING ROSTERS ===")
+try:
+    player_records = []
+
+    for team_key, team_name in team_names.items():
+        try:
+            team_obj = lg.to_team(team_key)
+            roster = team_obj.roster()
+
+            for player in roster:
+                if isinstance(player, dict):
+                    player_records.append({
+                        'team_key': team_key,
+                        'team_name': team_name,
+                        'player_id': player.get('player_id', ''),
+                        'player_name': player.get('name', ''),
+                        'position': player.get('position_type', ''),
+                        'selected_position': player.get('selected_position', ''),
+                        'status': player.get('status', ''),
+                        'nba_team': player.get('editorial_team_abbr', ''),
+                        'extracted_at': timestamp,
+                        'league_id': league_id
+                    })
+        except Exception as e:
+            print(f"Error getting roster for {team_key}: {e}")
+
+        time.sleep(0.3)  # Rate limit protection
+
+    if player_records:
+        df_players = pd.DataFrame(player_records)
+
+        table_id = f"{project_id}.{dataset}.rosters"
+        job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE", autodetect=True)
+        job = client.load_table_from_dataframe(df_players, table_id, job_config=job_config)
+        job.result()
+        print(f"Loaded {len(df_players)} rostered players!")
+    else:
+        print("No roster data collected")
+
+except Exception as e:
+    print(f"Error with rosters: {e}")
+    import traceback
+    traceback.print_exc()
+
+
 # ==================== ROSTERS (DRAFT DAY) ====================
 print("\n=== FETCHING DRAFT DAY ROSTERS ===")
 try:

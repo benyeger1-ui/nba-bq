@@ -388,15 +388,26 @@ if all_transactions:
 else:
     print("⚠️ No transactions collected")
     
-# ==================== ROSTERS ====================
-print("\n=== FETCHING ROSTERS ===")
+# ==================== ROSTERS (DRAFT DAY) ====================
+print("\n=== FETCHING DRAFT DAY ROSTERS ===")
 try:
     player_records = []
+    
+    # Get the league start date
+    league_start_date = settings.get('start_date', '')
+    print(f"League started: {league_start_date}")
     
     for team_key, team_name in team_names.items():
         try:
             team_obj = lg.to_team(team_key)
-            roster = team_obj.roster()
+            
+            # Get roster from the start of the season
+            # Use the league start date
+            if league_start_date:
+                roster = team_obj.roster(day=league_start_date)
+            else:
+                # Fallback to week 1
+                roster = team_obj.roster(week=1)
             
             for player in roster:
                 if isinstance(player, dict):
@@ -409,22 +420,23 @@ try:
                         'selected_position': player.get('selected_position', ''),
                         'status': player.get('status', ''),
                         'nba_team': player.get('editorial_team_abbr', ''),
+                        'roster_date': league_start_date if league_start_date else 'week_1',
                         'extracted_at': timestamp,
                         'league_id': league_id
                     })
         except Exception as e:
             print(f"Error getting roster for {team_key}: {e}")
         
-        time.sleep(0.3)  # Rate limit protection
+        time.sleep(0.3)
     
     if player_records:
         df_players = pd.DataFrame(player_records)
         
-        table_id = f"{project_id}.{dataset}.rosters"
+        table_id = f"{project_id}.{dataset}.rosters_draft"
         job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE", autodetect=True)
         job = client.load_table_from_dataframe(df_players, table_id, job_config=job_config)
         job.result()
-        print(f"Loaded {len(df_players)} rostered players!")
+        print(f"Loaded {len(df_players)} draft day roster records!")
     else:
         print("No roster data collected")
         
@@ -432,7 +444,7 @@ except Exception as e:
     print(f"Error with rosters: {e}")
     import traceback
     traceback.print_exc()
-
+    
 # ==================== PLAYER POOL ====================
 print("\n=== FETCHING PLAYER POOL ===")
 try:

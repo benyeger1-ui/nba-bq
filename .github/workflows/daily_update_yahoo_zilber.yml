@@ -41,4 +41,4 @@ jobs:
         BQ_DATASET_NBA_YAHOO_ZILBER: ${{ secrets.BQ_DATASET_NBA_YAHOO_ZILBER }}
         YAHOO_OAUTH_TOKEN: ${{ secrets.YAHOO_OAUTH_TOKEN }}
       run: |
-        python fetch_data_from_yahoo_25_6.py
+        python fetch_data_from_yahoo_zilber.py

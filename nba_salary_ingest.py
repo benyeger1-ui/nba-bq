@@ -4,14 +4,13 @@
 import os
 import sys
 import json
-import time
 import argparse
 import datetime
 from typing import List, Optional, Dict, Any
-import requests
 
 import pandas as pd
 from pandas.api.types import is_object_dtype
+import requests
 
 from google.cloud import bigquery
 from google.oauth2 import service_account
@@ -37,182 +36,117 @@ SALARY_SCHEMA = [
     bigquery.SchemaField("scrape_timestamp", "TIMESTAMP"),
 ]
 
-# NBA Fantasy API endpoints (discovered through network inspection)
-# These are the internal APIs the website uses
-NBA_FANTASY_BASE_URL = "https://nbafantasy.nba.com"
-POSSIBLE_API_ENDPOINTS = [
-    "/api/players",
-    "/api/v1/players",
-    "/api/squad-selection/players",
-    "/api/roster/players",
-    "/players/all",
-]
+# NBA Fantasy API endpoint
+NBA_FANTASY_API = "https://nbafantasy.nba.com/api/bootstrap-static/"
 
 
 def fetch_players_from_api() -> List[Dict]:
     """
-    Try to fetch player data from NBA Fantasy internal API endpoints
+    Fetch player data from NBA Fantasy API
     """
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         'Accept': 'application/json',
-        'Referer': 'https://nbafantasy.nba.com/squad-selection',
-        'Origin': 'https://nbafantasy.nba.com',
     }
     
-    salary_data = []
+    print(f"Fetching data from: {NBA_FANTASY_API}")
     
-    # Try each possible endpoint
-    for endpoint in POSSIBLE_API_ENDPOINTS:
-        url = f"{NBA_FANTASY_BASE_URL}{endpoint}"
-        print(f"Trying endpoint: {url}")
+    try:
+        response = requests.get(NBA_FANTASY_API, headers=headers, timeout=30)
+        response.raise_for_status()
         
-        try:
-            response = requests.get(url, headers=headers, timeout=10)
-            
-            if response.status_code == 200:
-                print(f"✅ Success! Got response from {endpoint}")
-                
-                try:
-                    data = response.json()
-                    print(f"Response type: {type(data)}")
-                    
-                    # Handle different response structures
-                    if isinstance(data, list):
-                        print(f"Got list with {len(data)} items")
-                        players = data
-                    elif isinstance(data, dict):
-                        print(f"Got dict with keys: {list(data.keys())[:10]}")
-                        # Try common keys where player data might be nested
-                        for key in ['players', 'data', 'results', 'roster', 'squad']:
-                            if key in data and isinstance(data[key], list):
-                                players = data[key]
-                                print(f"Found {len(players)} players in '{key}' field")
-                                break
-                        else:
-                            players = [data]  # Single player object
-                    else:
-                        print(f"Unexpected data type: {type(data)}")
-                        continue
-                    
-                    # Extract player information
-                    for player in players:
-                        if isinstance(player, dict):
-                            player_info = extract_player_info(player)
-                            if player_info:
-                                salary_data.append(player_info)
-                    
-                    if salary_data:
-                        print(f"✅ Successfully extracted {len(salary_data)} players from API")
-                        return salary_data
-                    
-                except json.JSONDecodeError:
-                    print(f"❌ Response is not valid JSON")
-                    print(f"Response preview: {response.text[:500]}")
-            
-            elif response.status_code == 404:
-                print(f"❌ Endpoint not found (404)")
-            else:
-                print(f"❌ Got status code: {response.status_code}")
+        data = response.json()
+        print(f"✅ Successfully retrieved data from API")
         
-        except requests.exceptions.Timeout:
-            print(f"❌ Request timeout")
-        except Exception as e:
-            print(f"❌ Error: {e}")
+        # Extract players from the response
+        if 'elements' in data:
+            players = data['elements']
+            print(f"Found {len(players)} players in API response")
+        else:
+            print(f"❌ No 'elements' key found in response")
+            print(f"Available keys: {list(data.keys())}")
+            return []
         
-        time.sleep(0.5)  # Be respectful with requests
-    
-    return salary_data
+        # Extract player information
+        salary_data = []
+        for player in players:
+            player_info = extract_player_info(player, data)
+            if player_info:
+                salary_data.append(player_info)
+        
+        print(f"✅ Successfully extracted {len(salary_data)} players")
+        return salary_data
+        
+    except requests.exceptions.RequestException as e:
+        print(f"❌ Error fetching data from API: {e}")
+        return []
+    except json.JSONDecodeError as e:
+        print(f"❌ Error parsing JSON response: {e}")
+        return []
 
 
-def extract_player_info(player_data: Dict) -> Optional[Dict]:
+def extract_player_info(player: Dict, full_data: Dict) -> Optional[Dict]:
     """
     Extract player information from API response
-    Try various possible field names
+    
+    Key fields in the API:
+    - first_name, second_name, web_name: player names
+    - team: team ID (need to map to team name)
+    - element_type: position type (1=Backcourt, 2=Frontcourt based on the data)
+    - now_cost: price (appears to be in units, need to divide by 10 to get millions)
     """
-    # Possible field names for each attribute
-    name_fields = ['name', 'playerName', 'player_name', 'fullName', 'full_name', 'displayName']
-    team_fields = ['team', 'teamName', 'team_name', 'teamAbbr', 'team_abbr', 'teamTricode']
-    position_fields = ['position', 'pos', 'positions', 'eligiblePositions']
-    price_fields = ['price', 'salary', 'cost', 'value', 'salaryCap', 'salary_cap', 'fantasyPrice']
-    
-    name = None
-    team = None
-    position = None
-    price = None
-    
-    # Extract name
-    for field in name_fields:
-        if field in player_data:
-            name = str(player_data[field])
-            break
-    
-    # Extract team
-    for field in team_fields:
-        if field in player_data:
-            team = str(player_data[field])
-            break
-    
-    # Extract position
-    for field in position_fields:
-        if field in player_data:
-            pos_value = player_data[field]
-            if isinstance(pos_value, list):
-                position = normalize_position(pos_value[0] if pos_value else "")
-            else:
-                position = normalize_position(str(pos_value))
-            break
-    
-    # Extract price
-    for field in price_fields:
-        if field in player_data:
-            try:
-                price_value = player_data[field]
-                if isinstance(price_value, (int, float)):
-                    price = float(price_value)
-                else:
-                    price = parse_price(str(price_value))
-                break
-            except:
-                continue
-    
-    if name:  # At minimum we need a name
+    try:
+        # Extract basic info
+        first_name = player.get('first_name', '')
+        second_name = player.get('second_name', '')
+        web_name = player.get('web_name', '')
+        
+        # Use web_name if available, otherwise combine first and second name
+        player_name = web_name if web_name else f"{first_name} {second_name}".strip()
+        
+        if not player_name:
+            return None
+        
+        # Extract team (map team ID to team name)
+        team_id = player.get('team')
+        team_name = get_team_name(team_id, full_data)
+        
+        # Extract position (element_type: 1=Backcourt, 2=Frontcourt)
+        element_type = player.get('element_type')
+        position = "Backcourt" if element_type == 1 else "Frontcourt"
+        
+        # Extract price (now_cost is in units of 0.1M, so divide by 10)
+        now_cost = player.get('now_cost')
+        price = float(now_cost) / 10.0 if now_cost is not None else None
+        
         return {
-            "player_name": name,
-            "team": team or "Unknown",
-            "position": position or "Unknown",
+            "player_name": player_name,
+            "team": team_name,
+            "position": position,
             "price": price,
         }
     
-    return None
-
-
-def normalize_position(position_text: str) -> str:
-    """Normalize position to Backcourt or Frontcourt"""
-    pos_upper = position_text.upper().strip()
-    
-    # Backcourt: PG, SG, G
-    if any(p in pos_upper for p in ["PG", "SG"]) or pos_upper == "G":
-        return "Backcourt"
-    
-    # Frontcourt: SF, PF, C, F
-    if any(p in pos_upper for p in ["SF", "PF", "C"]) or pos_upper == "F":
-        return "Frontcourt"
-    
-    return position_text
-
-
-def parse_price(price_text: str) -> Optional[float]:
-    """Parse price text to float"""
-    try:
-        cleaned = price_text.replace("$", "").replace("M", "").replace(",", "").strip()
-        
-        if "." in cleaned or len(cleaned) <= 4:
-            return float(cleaned)
-        else:
-            return float(cleaned) / 1_000_000
-    except:
+    except Exception as e:
+        print(f"Error extracting player info: {e}")
         return None
+
+
+def get_team_name(team_id: int, full_data: Dict) -> str:
+    """
+    Map team ID to team abbreviation/name
+    """
+    if not team_id:
+        return "Unknown"
+    
+    # Look for teams data in the response
+    if 'teams' in full_data:
+        teams = full_data['teams']
+        for team in teams:
+            if team.get('id') == team_id:
+                # Try to get short_name or name
+                return team.get('short_name') or team.get('name') or f"Team_{team_id}"
+    
+    return f"Team_{team_id}"
 
 
 def ensure_dataset() -> None:
@@ -273,101 +207,54 @@ def ingest_salary_data() -> None:
     """Main function to fetch and ingest salary cap data"""
     ensure_tables()
     
-    print("=" * 60)
+    print("=" * 70)
     print("NBA Fantasy Salary Cap Data Ingestion")
     print(f"Timestamp: {datetime.datetime.now()}")
-    print("=" * 60)
+    print("=" * 70)
     
-    print("\n📡 Attempting to fetch data from NBA Fantasy API...")
     salary_data = fetch_players_from_api()
     
     if not salary_data:
-        print("\n❌ Could not fetch data from API endpoints")
-        print("\n💡 NEXT STEPS:")
-        print("1. Visit https://nbafantasy.nba.com/squad-selection in your browser")
-        print("2. Open Developer Tools (F12)")
-        print("3. Go to Network tab")
-        print("4. Look for API calls when the page loads")
-        print("5. Find the endpoint that returns player data")
-        print("6. Update POSSIBLE_API_ENDPOINTS in this script")
-        print("\nAlternatively, you can manually export the data from the website")
+        print("\n❌ No data retrieved from API")
         sys.exit(1)
     
     df = pd.DataFrame(salary_data)
     
     print(f"\n✅ Successfully fetched {len(df)} player salaries")
     
-    print("\n📊 Sample data:")
-    print(df.head(10).to_string())
+    # Display sample data
+    print("\n📊 Sample data (first 10 players):")
+    print(df.head(10).to_string(index=False))
     
+    # Display statistics
     print("\n📈 Position distribution:")
     print(df["position"].value_counts())
     
     print("\n💰 Price statistics:")
     print(df["price"].describe())
     
+    print("\n🏀 Team distribution (top 10):")
+    print(df["team"].value_counts().head(10))
+    
+    # Load to BigQuery
     print("\n📤 Loading to BigQuery...")
     load_df(df)
     
-    print("\n" + "=" * 60)
+    print("\n" + "=" * 70)
     print("✅ Salary data ingestion complete!")
-    print("=" * 60)
-
-
-def test_endpoints() -> None:
-    """Test function to discover API endpoints"""
-    print("🔍 Testing NBA Fantasy API endpoints...\n")
-    
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Accept': 'application/json',
-    }
-    
-    # Additional endpoints to try
-    test_endpoints = POSSIBLE_API_ENDPOINTS + [
-        "/api/gameweek/current",
-        "/api/season/current",
-        "/api/leaderboard",
-    ]
-    
-    for endpoint in test_endpoints:
-        url = f"{NBA_FANTASY_BASE_URL}{endpoint}"
-        print(f"Testing: {url}")
-        
-        try:
-            response = requests.get(url, headers=headers, timeout=5)
-            print(f"  Status: {response.status_code}")
-            
-            if response.status_code == 200:
-                try:
-                    data = response.json()
-                    print(f"  ✅ Valid JSON response")
-                    print(f"  Type: {type(data)}")
-                    if isinstance(data, dict):
-                        print(f"  Keys: {list(data.keys())[:10]}")
-                    elif isinstance(data, list):
-                        print(f"  Items: {len(data)}")
-                        if data:
-                            print(f"  First item keys: {list(data[0].keys()) if isinstance(data[0], dict) else 'N/A'}")
-                except:
-                    print(f"  ❌ Not JSON: {response.text[:100]}")
-            
-            print()
-        except Exception as e:
-            print(f"  ❌ Error: {e}\n")
-        
-        time.sleep(0.5)
+    print(f"   Total players: {len(df)}")
+    print(f"   Backcourt: {len(df[df['position'] == 'Backcourt'])}")
+    print(f"   Frontcourt: {len(df[df['position'] == 'Frontcourt'])}")
+    print("=" * 70)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Fetch NBA salary cap data from API")
-    parser.add_argument("--test", action="store_true", help="Test API endpoints")
+    parser = argparse.ArgumentParser(
+        description="Fetch NBA Fantasy salary cap data"
+    )
     args = parser.parse_args()
     
-    if args.test:
-        test_endpoints()
-    else:
-        ingest_salary_data()
+    ingest_salary_data()
 
 
 if __name__ == "__main__":

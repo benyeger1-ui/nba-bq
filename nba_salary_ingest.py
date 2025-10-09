@@ -7,23 +7,14 @@ import json
 import time
 import argparse
 import datetime
-import re
 from typing import List, Optional, Dict, Any
+import requests
 
 import pandas as pd
 from pandas.api.types import is_object_dtype
 
 from google.cloud import bigquery
 from google.oauth2 import service_account
-
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
-from selenium.common.exceptions import TimeoutException, NoSuchElementException
-from webdriver_manager.chrome import ChromeDriverManager
 
 # -----------------------------------
 # Config via environment
@@ -46,111 +37,104 @@ SALARY_SCHEMA = [
     bigquery.SchemaField("scrape_timestamp", "TIMESTAMP"),
 ]
 
-
-def setup_driver() -> webdriver.Chrome:
-    """Setup Chrome driver for headless scraping with proper version management"""
-    chrome_options = Options()
-    chrome_options.add_argument("--headless=new")
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("--window-size=1920,1080")
-    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    chrome_options.add_experimental_option('useAutomationExtension', False)
-    chrome_options.add_argument(
-        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    )
-    
-    # Use webdriver-manager to handle version compatibility
-    service = Service(ChromeDriverManager().install())
-    driver = webdriver.Chrome(service=service, options=chrome_options)
-    
-    # Execute script to remove webdriver property
-    driver.execute_cdp_cmd('Network.setUserAgentOverride', {
-        "userAgent": 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    })
-    
-    return driver
+# NBA Fantasy API endpoints (discovered through network inspection)
+# These are the internal APIs the website uses
+NBA_FANTASY_BASE_URL = "https://nbafantasy.nba.com"
+POSSIBLE_API_ENDPOINTS = [
+    "/api/players",
+    "/api/v1/players",
+    "/api/squad-selection/players",
+    "/api/roster/players",
+    "/players/all",
+]
 
 
-def extract_json_from_script_tags(page_source: str) -> List[Dict]:
-    """Extract player data from JavaScript/JSON in the page source"""
+def fetch_players_from_api() -> List[Dict]:
+    """
+    Try to fetch player data from NBA Fantasy internal API endpoints
+    """
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'application/json',
+        'Referer': 'https://nbafantasy.nba.com/squad-selection',
+        'Origin': 'https://nbafantasy.nba.com',
+    }
+    
     salary_data = []
     
-    try:
-        # Look for common patterns where React apps store initial state
-        patterns = [
-            r'window\.__INITIAL_STATE__\s*=\s*({.*?});',
-            r'window\.__PRELOADED_STATE__\s*=\s*({.*?});',
-            r'var\s+players\s*=\s*(\[.*?\]);',
-            r'window\.players\s*=\s*(\[.*?\]);',
-            r'"players"\s*:\s*(\[.*?\])',
-        ]
+    # Try each possible endpoint
+    for endpoint in POSSIBLE_API_ENDPOINTS:
+        url = f"{NBA_FANTASY_BASE_URL}{endpoint}"
+        print(f"Trying endpoint: {url}")
         
-        for pattern in patterns:
-            matches = re.findall(pattern, page_source, re.DOTALL)
-            if matches:
-                print(f"Found potential JSON data with pattern: {pattern[:50]}")
-                for match in matches:
-                    try:
-                        data = json.loads(match)
-                        print(f"Successfully parsed JSON data, type: {type(data)}")
-                        
-                        # Extract player info based on data structure
-                        if isinstance(data, list):
-                            for item in data:
-                                if isinstance(item, dict):
-                                    player = extract_player_from_dict(item)
-                                    if player:
-                                        salary_data.append(player)
-                        elif isinstance(data, dict):
-                            # Navigate through nested structure
-                            players = find_players_in_dict(data)
-                            salary_data.extend(players)
-                    except json.JSONDecodeError:
+        try:
+            response = requests.get(url, headers=headers, timeout=10)
+            
+            if response.status_code == 200:
+                print(f"✅ Success! Got response from {endpoint}")
+                
+                try:
+                    data = response.json()
+                    print(f"Response type: {type(data)}")
+                    
+                    # Handle different response structures
+                    if isinstance(data, list):
+                        print(f"Got list with {len(data)} items")
+                        players = data
+                    elif isinstance(data, dict):
+                        print(f"Got dict with keys: {list(data.keys())[:10]}")
+                        # Try common keys where player data might be nested
+                        for key in ['players', 'data', 'results', 'roster', 'squad']:
+                            if key in data and isinstance(data[key], list):
+                                players = data[key]
+                                print(f"Found {len(players)} players in '{key}' field")
+                                break
+                        else:
+                            players = [data]  # Single player object
+                    else:
+                        print(f"Unexpected data type: {type(data)}")
                         continue
-    
-    except Exception as e:
-        print(f"Error extracting JSON: {e}")
+                    
+                    # Extract player information
+                    for player in players:
+                        if isinstance(player, dict):
+                            player_info = extract_player_info(player)
+                            if player_info:
+                                salary_data.append(player_info)
+                    
+                    if salary_data:
+                        print(f"✅ Successfully extracted {len(salary_data)} players from API")
+                        return salary_data
+                    
+                except json.JSONDecodeError:
+                    print(f"❌ Response is not valid JSON")
+                    print(f"Response preview: {response.text[:500]}")
+            
+            elif response.status_code == 404:
+                print(f"❌ Endpoint not found (404)")
+            else:
+                print(f"❌ Got status code: {response.status_code}")
+        
+        except requests.exceptions.Timeout:
+            print(f"❌ Request timeout")
+        except Exception as e:
+            print(f"❌ Error: {e}")
+        
+        time.sleep(0.5)  # Be respectful with requests
     
     return salary_data
 
 
-def find_players_in_dict(data: Dict, depth: int = 0) -> List[Dict]:
-    """Recursively search for player data in nested dictionaries"""
-    players = []
-    
-    if depth > 10:  # Prevent infinite recursion
-        return players
-    
-    for key, value in data.items():
-        if key.lower() in ['players', 'playerlist', 'roster', 'squad']:
-            if isinstance(value, list):
-                for item in value:
-                    if isinstance(item, dict):
-                        player = extract_player_from_dict(item)
-                        if player:
-                            players.append(player)
-        elif isinstance(value, dict):
-            players.extend(find_players_in_dict(value, depth + 1))
-        elif isinstance(value, list):
-            for item in value:
-                if isinstance(item, dict):
-                    player = extract_player_from_dict(item)
-                    if player:
-                        players.append(player)
-    
-    return players
-
-
-def extract_player_from_dict(data: Dict) -> Optional[Dict]:
-    """Extract player info from a dictionary"""
-    # Look for common field names
-    name_fields = ['name', 'playerName', 'player_name', 'fullName', 'full_name']
-    team_fields = ['team', 'teamName', 'team_name', 'teamAbbr', 'team_abbr']
-    position_fields = ['position', 'pos', 'positions']
-    price_fields = ['price', 'salary', 'cost', 'value', 'salaryCap', 'salary_cap']
+def extract_player_info(player_data: Dict) -> Optional[Dict]:
+    """
+    Extract player information from API response
+    Try various possible field names
+    """
+    # Possible field names for each attribute
+    name_fields = ['name', 'playerName', 'player_name', 'fullName', 'full_name', 'displayName']
+    team_fields = ['team', 'teamName', 'team_name', 'teamAbbr', 'team_abbr', 'teamTricode']
+    position_fields = ['position', 'pos', 'positions', 'eligiblePositions']
+    price_fields = ['price', 'salary', 'cost', 'value', 'salaryCap', 'salary_cap', 'fantasyPrice']
     
     name = None
     team = None
@@ -159,20 +143,20 @@ def extract_player_from_dict(data: Dict) -> Optional[Dict]:
     
     # Extract name
     for field in name_fields:
-        if field in data:
-            name = data[field]
+        if field in player_data:
+            name = str(player_data[field])
             break
     
     # Extract team
     for field in team_fields:
-        if field in data:
-            team = data[field]
+        if field in player_data:
+            team = str(player_data[field])
             break
     
     # Extract position
     for field in position_fields:
-        if field in data:
-            pos_value = data[field]
+        if field in player_data:
+            pos_value = player_data[field]
             if isinstance(pos_value, list):
                 position = normalize_position(pos_value[0] if pos_value else "")
             else:
@@ -181,9 +165,16 @@ def extract_player_from_dict(data: Dict) -> Optional[Dict]:
     
     # Extract price
     for field in price_fields:
-        if field in data:
-            price = parse_price(str(data[field]))
-            break
+        if field in player_data:
+            try:
+                price_value = player_data[field]
+                if isinstance(price_value, (int, float)):
+                    price = float(price_value)
+                else:
+                    price = parse_price(str(price_value))
+                break
+            except:
+                continue
     
     if name:  # At minimum we need a name
         return {
@@ -194,150 +185,6 @@ def extract_player_from_dict(data: Dict) -> Optional[Dict]:
         }
     
     return None
-
-
-def scrape_nba_salary_data() -> List[Dict]:
-    """
-    Scrape NBA salary cap game data from NBA.com
-    """
-    driver = setup_driver()
-    salary_data = []
-    
-    try:
-        print("Loading NBA Fantasy Salary Cap page...")
-        driver.get("https://nbafantasy.nba.com/squad-selection")
-        
-        # Wait for page to load
-        wait = WebDriverWait(driver, 30)
-        
-        print("Waiting for page content to load...")
-        time.sleep(8)  # Give extra time for JavaScript to execute
-        
-        # First, try to find JSON data in the page source
-        print("Attempting to extract data from page source...")
-        page_source = driver.page_source
-        
-        salary_data = extract_json_from_script_tags(page_source)
-        
-        if salary_data:
-            print(f"Successfully extracted {len(salary_data)} players from JSON data")
-            return salary_data
-        
-        # If JSON extraction failed, try Selenium selectors
-        print("JSON extraction failed, trying Selenium selectors...")
-        
-        # Wait for any React content to render
-        try:
-            wait.until(EC.presence_of_element_located((By.TAG_NAME, "main")))
-        except:
-            pass
-        
-        time.sleep(3)
-        
-        # Try different possible selectors
-        selectors_to_try = [
-            "div[data-testid*='player']",
-            "div[class*='player']",
-            "div[class*='Player']",
-            ".player-item",
-            ".player-card",
-            ".player-row",
-            "[data-player]",
-            ".roster-player",
-            ".squad-player",
-            "tr[class*='player']",
-            "li[class*='player']",
-        ]
-        
-        player_elements = []
-        for selector in selectors_to_try:
-            try:
-                elements = driver.find_elements(By.CSS_SELECTOR, selector)
-                if elements and len(elements) > 10:  # Should have many players
-                    print(f"Found {len(elements)} elements with selector: {selector}")
-                    player_elements = elements
-                    break
-            except:
-                continue
-        
-        if not player_elements:
-            print("Could not find player elements with known selectors")
-            print("\n=== Saving page source for debugging ===")
-            with open("page_source_debug.html", "w", encoding="utf-8") as f:
-                f.write(page_source)
-            print("Saved to page_source_debug.html")
-            
-            # Print a sample of the page structure
-            print("\n=== Looking for div elements with classes ===")
-            all_divs = driver.find_elements(By.TAG_NAME, "div")
-            class_counts = {}
-            for div in all_divs[:100]:  # Sample first 100
-                classes = div.get_attribute("class")
-                if classes:
-                    for cls in classes.split():
-                        if 'player' in cls.lower() or 'squad' in cls.lower() or 'roster' in cls.lower():
-                            class_counts[cls] = class_counts.get(cls, 0) + 1
-            
-            if class_counts:
-                print("Classes containing 'player', 'squad', or 'roster':")
-                for cls, count in sorted(class_counts.items(), key=lambda x: x[1], reverse=True)[:10]:
-                    print(f"  .{cls}: {count} occurrences")
-            
-            return salary_data
-        
-        print(f"Processing {len(player_elements)} players...")
-        
-        for idx, player_elem in enumerate(player_elements):
-            try:
-                # Get all text in the element
-                full_text = player_elem.text
-                
-                if not full_text:
-                    continue
-                
-                # Try to parse text for player info
-                lines = [line.strip() for line in full_text.split('\n') if line.strip()]
-                
-                if len(lines) >= 3:
-                    # Heuristic parsing
-                    name = lines[0]
-                    team = None
-                    position = None
-                    price = None
-                    
-                    for line in lines[1:]:
-                        if any(pos in line.upper() for pos in ['PG', 'SG', 'SF', 'PF', 'C', 'G', 'F']):
-                            position = normalize_position(line)
-                        elif '$' in line or 'M' in line or any(c.isdigit() for c in line):
-                            price = parse_price(line)
-                        elif len(line) <= 3 and line.isupper():
-                            team = line
-                    
-                    if name:
-                        salary_data.append({
-                            "player_name": name,
-                            "team": team or "Unknown",
-                            "position": position or "Unknown",
-                            "price": price,
-                        })
-                
-                if (idx + 1) % 50 == 0:
-                    print(f"Processed {idx + 1} players...")
-            
-            except Exception as e:
-                continue
-        
-        print(f"Successfully scraped {len(salary_data)} players")
-        
-    except Exception as e:
-        print(f"Error during scraping: {e}")
-        import traceback
-        traceback.print_exc()
-        
-    finally:
-        driver.quit()
-    
-    return salary_data
 
 
 def normalize_position(position_text: str) -> str:
@@ -356,17 +203,13 @@ def normalize_position(position_text: str) -> str:
 
 
 def parse_price(price_text: str) -> Optional[float]:
-    """Parse price text to float (e.g., '$7.5M' -> 7.5 or '7500000' -> 7.5)"""
+    """Parse price text to float"""
     try:
-        # Remove common characters
         cleaned = price_text.replace("$", "").replace("M", "").replace(",", "").strip()
         
-        # Handle different formats
         if "." in cleaned or len(cleaned) <= 4:
-            # Already in millions (e.g., "7.5" or "12.3")
             return float(cleaned)
         else:
-            # Full dollar amount (e.g., "7500000")
             return float(cleaned) / 1_000_000
     except:
         return None
@@ -427,109 +270,102 @@ def load_df(df: pd.DataFrame) -> None:
 
 
 def ingest_salary_data() -> None:
-    """Main function to scrape and ingest salary cap data"""
+    """Main function to fetch and ingest salary cap data"""
     ensure_tables()
     
-    print("Starting NBA salary cap data scraping...")
+    print("=" * 60)
+    print("NBA Fantasy Salary Cap Data Ingestion")
     print(f"Timestamp: {datetime.datetime.now()}")
+    print("=" * 60)
     
-    salary_data = scrape_nba_salary_data()
+    print("\n📡 Attempting to fetch data from NBA Fantasy API...")
+    salary_data = fetch_players_from_api()
     
     if not salary_data:
-        print("No salary data scraped")
-        print("\nℹ️  The NBA Fantasy website may require manual interaction or use a different data structure.")
-        print("Check the debug output above for more information.")
+        print("\n❌ Could not fetch data from API endpoints")
+        print("\n💡 NEXT STEPS:")
+        print("1. Visit https://nbafantasy.nba.com/squad-selection in your browser")
+        print("2. Open Developer Tools (F12)")
+        print("3. Go to Network tab")
+        print("4. Look for API calls when the page loads")
+        print("5. Find the endpoint that returns player data")
+        print("6. Update POSSIBLE_API_ENDPOINTS in this script")
+        print("\nAlternatively, you can manually export the data from the website")
         sys.exit(1)
     
     df = pd.DataFrame(salary_data)
-    print(f"\nScraped {len(df)} player salaries")
-    print("\nSample data:")
-    print(df.head(10))
     
-    print("\nPosition distribution:")
+    print(f"\n✅ Successfully fetched {len(df)} player salaries")
+    
+    print("\n📊 Sample data:")
+    print(df.head(10).to_string())
+    
+    print("\n📈 Position distribution:")
     print(df["position"].value_counts())
     
-    print("\nPrice statistics:")
+    print("\n💰 Price statistics:")
     print(df["price"].describe())
     
+    print("\n📤 Loading to BigQuery...")
     load_df(df)
-    print("\n✅ Salary data ingestion complete")
-
-
-def test_scrape() -> None:
-    """Test function to inspect page structure"""
-    driver = setup_driver()
     
-    try:
-        print("Loading page for inspection...")
-        driver.get("https://nbafantasy.nba.com/squad-selection")
+    print("\n" + "=" * 60)
+    print("✅ Salary data ingestion complete!")
+    print("=" * 60)
+
+
+def test_endpoints() -> None:
+    """Test function to discover API endpoints"""
+    print("🔍 Testing NBA Fantasy API endpoints...\n")
+    
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': 'application/json',
+    }
+    
+    # Additional endpoints to try
+    test_endpoints = POSSIBLE_API_ENDPOINTS + [
+        "/api/gameweek/current",
+        "/api/season/current",
+        "/api/leaderboard",
+    ]
+    
+    for endpoint in test_endpoints:
+        url = f"{NBA_FANTASY_BASE_URL}{endpoint}"
+        print(f"Testing: {url}")
         
-        print("Waiting for page to load...")
-        time.sleep(10)
+        try:
+            response = requests.get(url, headers=headers, timeout=5)
+            print(f"  Status: {response.status_code}")
+            
+            if response.status_code == 200:
+                try:
+                    data = response.json()
+                    print(f"  ✅ Valid JSON response")
+                    print(f"  Type: {type(data)}")
+                    if isinstance(data, dict):
+                        print(f"  Keys: {list(data.keys())[:10]}")
+                    elif isinstance(data, list):
+                        print(f"  Items: {len(data)}")
+                        if data:
+                            print(f"  First item keys: {list(data[0].keys()) if isinstance(data[0], dict) else 'N/A'}")
+                except:
+                    print(f"  ❌ Not JSON: {response.text[:100]}")
+            
+            print()
+        except Exception as e:
+            print(f"  ❌ Error: {e}\n")
         
-        page_source = driver.page_source
-        
-        # Save full page source
-        with open("page_source_full.html", "w", encoding="utf-8") as f:
-            f.write(page_source)
-        print("✅ Saved full page source to page_source_full.html")
-        
-        # Print page source preview
-        print("\n=== PAGE SOURCE PREVIEW (first 3000 chars) ===")
-        print(page_source[:3000])
-        
-        # Look for JSON data
-        print("\n=== CHECKING FOR JSON DATA ===")
-        json_patterns = [
-            'window.__INITIAL_STATE__',
-            'window.__PRELOADED_STATE__',
-            'var players',
-            'window.players',
-            '"players":',
-        ]
-        
-        for pattern in json_patterns:
-            if pattern in page_source:
-                print(f"✅ Found pattern: {pattern}")
-                start_idx = page_source.find(pattern)
-                print(f"   Context: {page_source[start_idx:start_idx+200]}")
-        
-        # Try to find common element patterns
-        print("\n=== LOOKING FOR COMMON PATTERNS ===")
-        patterns = [
-            "player",
-            "salary",
-            "price",
-            "squad",
-            "roster",
-        ]
-        
-        for pattern in patterns:
-            elements = driver.find_elements(By.XPATH, f"//*[contains(@class, '{pattern}')]")
-            if elements:
-                print(f"Found {len(elements)} elements with class containing '{pattern}'")
-        
-        # Check for data attributes
-        print("\n=== CHECKING DATA ATTRIBUTES ===")
-        test_attrs = ['data-testid', 'data-player', 'data-id']
-        for attr in test_attrs:
-            elements = driver.find_elements(By.XPATH, f"//*[@{attr}]")
-            if elements:
-                print(f"Found {len(elements)} elements with {attr} attribute")
-                if elements:
-                    print(f"  Example: {elements[0].get_attribute('outerHTML')[:200]}")
-        
-    finally:
-        driver.quit()
+        time.sleep(0.5)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Scrape NBA salary cap data")
-    parser.add_argument("--test", action="store_true", help="Run test scrape to inspect page")
+    parser = argparse.ArgumentParser(description="Fetch NBA salary cap data from API")
+    parser.add_argument("--test", action="store_true", help="Test API endpoints")
     args = parser.parse_args()
     
     if args.test:
-        test_scrape()
+        test_endpoints()
     else:
         ingest_salary_data()
 

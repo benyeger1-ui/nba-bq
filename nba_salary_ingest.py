@@ -99,10 +99,9 @@ def extract_player_info(player: Dict, full_data: Dict) -> Optional[Dict]:
         # Extract basic info
         first_name = player.get('first_name', '')
         second_name = player.get('second_name', '')
-        web_name = player.get('web_name', '')
         
-        # Use web_name if available, otherwise combine first and second name
-        player_name = web_name if web_name else f"{first_name} {second_name}".strip()
+        # Use full name (first + last)
+        player_name = f"{first_name} {second_name}".strip()
         
         if not player_name:
             return None

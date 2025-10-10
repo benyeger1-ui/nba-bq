@@ -89,6 +89,46 @@ except Exception as e:
 print("\n=== FETCHING MATCHUPS ===")
 all_matchup_records = []
 
+def get_team_games_played(lg, team_key, week):
+    """Get the total number of games played by a team's roster in a given week"""
+    try:
+        team_obj = lg.to_team(team_key)
+        roster = team_obj.roster(week=week)
+        
+        total_games = 0
+        for player in roster:
+            if isinstance(player, dict):
+                # Check if player was in starting lineup (not on bench)
+                selected_pos = player.get('selected_position', '')
+                
+                # Skip bench players (BN) and injured reserve (IL, IL+)
+                if selected_pos in ['BN', 'IL', 'IL+']:
+                    continue
+                
+                # Get player stats for the week to count games
+                # The player object might have a 'player_stats' field
+                player_stats = player.get('player_stats', {})
+                
+                if isinstance(player_stats, dict):
+                    stats = player_stats.get('stats', [])
+                    
+                    # Look for games played stat (stat_id: 0)
+                    for stat in stats:
+                        if isinstance(stat, dict) and 'stat' in stat:
+                            s = stat['stat']
+                            if s.get('stat_id') == '0':  # GP (Games Played)
+                                games = s.get('value', '0')
+                                try:
+                                    total_games += int(games)
+                                except:
+                                    pass
+                                break
+        
+        return total_games
+    except Exception as e:
+        print(f"Error getting games for {team_key} week {week}: {e}")
+        return 0
+
 for week in range(start_week, min(current_week + 1, end_week + 1)):
     print(f"Week {week}...", end=" ")
     try:
@@ -189,6 +229,18 @@ for week in range(start_week, min(current_week + 1, end_week + 1)):
                                             if sid in stat_map:
                                                 winners[f'winner_{stat_map[sid]}'] = wkey
                                 
+                                # Get games played for each team
+                                team1_key = team1_info.get('team_key', '')
+                                team2_key = team2_info.get('team_key', '')
+                                
+                                team1_games_played = 0
+                                team2_games_played = 0
+                                
+                                if team1_key:
+                                    team1_games_played = get_team_games_played(lg, team1_key, week)
+                                if team2_key:
+                                    team2_games_played = get_team_games_played(lg, team2_key, week)
+                                
                                 all_matchup_records.append({
                                     'week': matchup.get('week', week),
                                     'week_start': matchup.get('week_start', ''),
@@ -196,9 +248,10 @@ for week in range(start_week, min(current_week + 1, end_week + 1)):
                                     'status': matchup.get('status', ''),
                                     'is_playoffs': matchup.get('is_playoffs', '0'),
                                     'winner_team_key': matchup.get('winner_team_key', ''),
-                                    'team1_key': team1_info.get('team_key', ''),
+                                    'team1_key': team1_key,
                                     'team1_name': team1_info.get('name', ''),
                                     'team1_points': team1_points,
+                                    'team1_games_played': team1_games_played,
                                     'team1_fg_pct': team1_stats.get('fg_pct', ''),
                                     'team1_ft_pct': team1_stats.get('ft_pct', ''),
                                     'team1_threes': team1_stats.get('threes', ''),
@@ -208,9 +261,10 @@ for week in range(start_week, min(current_week + 1, end_week + 1)):
                                     'team1_stl': team1_stats.get('stl', ''),
                                     'team1_blk': team1_stats.get('blk', ''),
                                     'team1_to': team1_stats.get('to', ''),
-                                    'team2_key': team2_info.get('team_key', ''),
+                                    'team2_key': team2_key,
                                     'team2_name': team2_info.get('name', ''),
                                     'team2_points': team2_points,
+                                    'team2_games_played': team2_games_played,
                                     'team2_fg_pct': team2_stats.get('fg_pct', ''),
                                     'team2_ft_pct': team2_stats.get('ft_pct', ''),
                                     'team2_threes': team2_stats.get('threes', ''),
@@ -225,7 +279,7 @@ for week in range(start_week, min(current_week + 1, end_week + 1)):
                                     'league_id': league_id
                                 })
         print("✓")
-        time.sleep(0.5)  # Rate limit protection
+        time.sleep(1.0)  # Increased sleep time due to additional API calls
     except Exception as e:
         print(f"✗ {e}")
 
@@ -238,7 +292,7 @@ if all_matchup_records:
     job = client.load_table_from_dataframe(df_matchups, table_id, job_config=job_config)
     job.result()
     print(f"Loaded {len(df_matchups)} matchups!")
-
+    
 # ==================== TRANSACTIONS ====================
 print("\n=== FETCHING TRANSACTIONS ===")
 all_transactions = []

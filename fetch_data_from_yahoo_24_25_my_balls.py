@@ -90,44 +90,72 @@ except Exception as e:
 print("\n=== FETCHING MATCHUPS ===")
 all_matchup_records = []
 
-def get_team_games_played(lg, team_key, week):
+def get_team_games_played(sc, league_id, team_key, week):
     """Get the total number of games played by a team's roster in a given week"""
     try:
-        team_obj = lg.to_team(team_key)
-        roster = team_obj.roster(week=week)
+        # Use direct API call to get roster with stats for the week
+        url = f"https://fantasysports.yahooapis.com/fantasy/v2/team/{team_key}/roster;week={week}/players/stats;type=week;week={week}"
+        response = sc.session.get(url, params={'format': 'json'})
+        data = response.json()
         
         total_games = 0
-        for player in roster:
-            if isinstance(player, dict):
-                # Check if player was in starting lineup (not on bench)
-                selected_pos = player.get('selected_position', '')
-                
-                # Skip bench players (BN) and injured reserve (IL, IL+)
-                if selected_pos in ['BN', 'IL', 'IL+']:
-                    continue
-                
-                # Get player stats for the week to count games
-                # The player object might have a 'player_stats' field
-                player_stats = player.get('player_stats', {})
-                
-                if isinstance(player_stats, dict):
-                    stats = player_stats.get('stats', [])
-                    
-                    # Look for games played stat (stat_id: 0)
-                    for stat in stats:
-                        if isinstance(stat, dict) and 'stat' in stat:
-                            s = stat['stat']
-                            if s.get('stat_id') == '0':  # GP (Games Played)
-                                games = s.get('value', '0')
-                                try:
-                                    total_games += int(games)
-                                except:
-                                    pass
-                                break
+        
+        if 'fantasy_content' in data and 'team' in data['fantasy_content']:
+            team_data = data['fantasy_content']['team']
+            
+            # Navigate through the nested structure
+            if isinstance(team_data, list):
+                for item in team_data:
+                    if isinstance(item, dict) and 'roster' in item:
+                        roster_obj = item['roster']
+                        
+                        # Get players from roster
+                        if '0' in roster_obj and 'players' in roster_obj['0']:
+                            players = roster_obj['0']['players']
+                            
+                            for pkey in players:
+                                if pkey == 'count':
+                                    continue
+                                
+                                if 'player' in players[pkey]:
+                                    player_list = players[pkey]['player']
+                                    
+                                    selected_pos = ''
+                                    games_played = 0
+                                    
+                                    if isinstance(player_list, list):
+                                        # Get selected position from first section
+                                        if len(player_list) > 0:
+                                            for pitem in player_list[0]:
+                                                if isinstance(pitem, dict):
+                                                    if 'selected_position' in pitem:
+                                                        selected_pos = pitem['selected_position']
+                                        
+                                        # Get stats from player_stats section
+                                        if len(player_list) > 1:
+                                            for section in player_list[1:]:
+                                                if isinstance(section, dict) and 'player_stats' in section:
+                                                    player_stats = section['player_stats']
+                                                    if isinstance(player_stats, dict) and 'stats' in player_stats:
+                                                        for stat in player_stats['stats']:
+                                                            if isinstance(stat, dict) and 'stat' in stat:
+                                                                s = stat['stat']
+                                                                if s.get('stat_id') == '0':  # GP
+                                                                    try:
+                                                                        games_played = int(float(s.get('value', '0')))
+                                                                    except:
+                                                                        games_played = 0
+                                                                    break
+                                    
+                                    # Only count if not on bench or IL
+                                    if selected_pos and selected_pos not in ['BN', 'IL', 'IL+']:
+                                        total_games += games_played
         
         return total_games
     except Exception as e:
-        print(f"Error getting games for {team_key} week {week}: {e}")
+        print(f"\nError getting games for {team_key} week {week}: {e}")
+        import traceback
+        traceback.print_exc()
         return 0
 
 for week in range(start_week, min(current_week + 1, end_week + 1)):
@@ -238,9 +266,9 @@ for week in range(start_week, min(current_week + 1, end_week + 1)):
                                 team2_games_played = 0
                                 
                                 if team1_key:
-                                    team1_games_played = get_team_games_played(lg, team1_key, week)
+                                    team1_games_played = get_team_games_played(sc, league_id, team1_key, week)
                                 if team2_key:
-                                    team2_games_played = get_team_games_played(lg, team2_key, week)
+                                    team2_games_played = get_team_games_played(sc, league_id, team2_key, week)
                                 
                                 all_matchup_records.append({
                                     'week': matchup.get('week', week),

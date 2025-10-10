@@ -178,38 +178,6 @@ def get_team_games_played(sc, league_id, team_key, week, debug=False):
         import traceback
         traceback.print_exc()
         return 0
-                                        if len(player_list) > 0:
-                                            for pitem in player_list[0]:
-                                                if isinstance(pitem, dict):
-                                                    if 'selected_position' in pitem:
-                                                        selected_pos = pitem['selected_position']
-                                        
-                                        # Get stats from player_stats section
-                                        if len(player_list) > 1:
-                                            for section in player_list[1:]:
-                                                if isinstance(section, dict) and 'player_stats' in section:
-                                                    player_stats = section['player_stats']
-                                                    if isinstance(player_stats, dict) and 'stats' in player_stats:
-                                                        for stat in player_stats['stats']:
-                                                            if isinstance(stat, dict) and 'stat' in stat:
-                                                                s = stat['stat']
-                                                                if s.get('stat_id') == '0':  # GP
-                                                                    try:
-                                                                        games_played = int(float(s.get('value', '0')))
-                                                                    except:
-                                                                        games_played = 0
-                                                                    break
-                                    
-                                    # Only count if not on bench or IL
-                                    if selected_pos and selected_pos not in ['BN', 'IL', 'IL+']:
-                                        total_games += games_played
-        
-        return total_games
-    except Exception as e:
-        print(f"\nError getting games for {team_key} week {week}: {e}")
-        import traceback
-        traceback.print_exc()
-        return 0
 
 for week in range(start_week, min(current_week + 1, end_week + 1)):
     print(f"Week {week}...", end=" ")

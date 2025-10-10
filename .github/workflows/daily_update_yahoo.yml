@@ -1,4 +1,4 @@
-name: Daily Fantasy Data Update Yahoo
+name: Daily Fantasy Data Update Yahoo Last year myballs
 
 on:
   schedule:
@@ -41,4 +41,4 @@ jobs:
         BQ_DATASET_NBA_YAHOO: ${{ secrets.BQ_DATASET_NBA_YAHOO }}
         YAHOO_OAUTH_TOKEN: ${{ secrets.YAHOO_OAUTH_TOKEN }}
       run: |
-        python fetch_data_from_yahoo.py
+        python fetch_data_from_yahoo_24_25_my_balls.py

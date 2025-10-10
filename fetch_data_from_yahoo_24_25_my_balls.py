@@ -86,6 +86,7 @@ except Exception as e:
     print(f"Error: {e}")
 
 # ==================== MATCHUPS ====================
+# ==================== MATCHUPS WITH GAMES PLAYED ====================
 print("\n=== FETCHING MATCHUPS ===")
 all_matchup_records = []
 

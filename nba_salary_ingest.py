@@ -193,7 +193,7 @@ def load_df(df: pd.DataFrame) -> None:
     
     job_config = bigquery.LoadJobConfig(
         schema=SALARY_SCHEMA,
-        write_disposition="WRITE_APPEND",
+        write_disposition="WRITE_TRUNCATE",
         schema_update_options=[bigquery.SchemaUpdateOption.ALLOW_FIELD_ADDITION],
     )
     

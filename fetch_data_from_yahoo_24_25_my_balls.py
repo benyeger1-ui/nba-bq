@@ -98,8 +98,8 @@ for week in range(start_week, min(current_week + 1, end_week + 1)):
         # DEBUG: Print first matchup structure to find games played
         if week == start_week:
             import json
-            print("\n=== DEBUG: Full matchup data structure (first 20000 chars) ===")
-            print(json.dumps(matchups_data, indent=2)[:20000])
+            print("\n=== DEBUG: Checking games played extraction ===")
+            # Don't print full JSON, just check the values
         
         if isinstance(matchups_data, dict) and 'fantasy_content' in matchups_data:
             content = matchups_data['fantasy_content']
@@ -147,13 +147,6 @@ for week in range(start_week, min(current_week + 1, end_week + 1)):
                                                         sid = s.get('stat_id', '')
                                                         sval = s.get('value', '')
                                                         
-                                                        # stat_id 0 is Games Played (GP)
-                                                        if sid == '0':
-                                                            try:
-                                                                team1_games_played = int(float(sval))
-                                                            except:
-                                                                team1_games_played = 0
-                                                        
                                                         stat_map = {'5': 'fg_pct', '8': 'ft_pct', '10': 'threes', '12': 'pts', '15': 'reb', '16': 'ast', '17': 'stl', '18': 'blk', '19': 'to'}
                                                         if sid in stat_map:
                                                             team1_stats[stat_map[sid]] = sval
@@ -162,6 +155,14 @@ for week in range(start_week, min(current_week + 1, end_week + 1)):
                                             tp = team1_data[1]['team_points']
                                             if isinstance(tp, dict):
                                                 team1_points = float(tp.get('total', 0))
+                                        
+                                        # Get games played from team_remaining_games
+                                        if 'team_remaining_games' in team1_data[1]:
+                                            trg = team1_data[1]['team_remaining_games']
+                                            if isinstance(trg, dict) and 'total' in trg:
+                                                total_obj = trg['total']
+                                                if isinstance(total_obj, dict):
+                                                    team1_games_played = int(total_obj.get('completed_games', 0))
                                 
                                 # Parse team 2
                                 team2_info = {}
@@ -185,13 +186,6 @@ for week in range(start_week, min(current_week + 1, end_week + 1)):
                                                         sid = s.get('stat_id', '')
                                                         sval = s.get('value', '')
                                                         
-                                                        # stat_id 0 is Games Played (GP)
-                                                        if sid == '0':
-                                                            try:
-                                                                team2_games_played = int(float(sval))
-                                                            except:
-                                                                team2_games_played = 0
-                                                        
                                                         stat_map = {'5': 'fg_pct', '8': 'ft_pct', '10': 'threes', '12': 'pts', '15': 'reb', '16': 'ast', '17': 'stl', '18': 'blk', '19': 'to'}
                                                         if sid in stat_map:
                                                             team2_stats[stat_map[sid]] = sval
@@ -200,6 +194,14 @@ for week in range(start_week, min(current_week + 1, end_week + 1)):
                                             tp = team2_data[1]['team_points']
                                             if isinstance(tp, dict):
                                                 team2_points = float(tp.get('total', 0))
+                                        
+                                        # Get games played from team_remaining_games
+                                        if 'team_remaining_games' in team2_data[1]:
+                                            trg = team2_data[1]['team_remaining_games']
+                                            if isinstance(trg, dict) and 'total' in trg:
+                                                total_obj = trg['total']
+                                                if isinstance(total_obj, dict):
+                                                    team2_games_played = int(total_obj.get('completed_games', 0))
                                 
                                 # Get winners
                                 stat_winners = matchup.get('stat_winners', [])

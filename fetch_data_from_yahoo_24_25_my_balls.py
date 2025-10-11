@@ -90,99 +90,16 @@ except Exception as e:
 print("\n=== FETCHING MATCHUPS ===")
 all_matchup_records = []
 
-def get_team_games_played(sc, league_id, team_key, week, debug=False):
-    """Get the total number of games played by a team's roster in a given week"""
-    try:
-        # Use direct API call to get roster with stats for the week
-        url = f"https://fantasysports.yahooapis.com/fantasy/v2/team/{team_key}/roster;week={week}/players/stats"
-        response = sc.session.get(url, params={'format': 'json'})
-        data = response.json()
-        
-        if debug:
-            import json
-            print(f"\n=== DEBUG: Team {team_key} Week {week} ===")
-            print(f"URL: {url}")
-            print(f"Response status: {response.status_code}")
-            print("First 3000 chars of response:")
-            print(json.dumps(data, indent=2)[:3000])
-        
-        total_games = 0
-        player_count = 0
-        
-        if 'fantasy_content' in data and 'team' in data['fantasy_content']:
-            team_data = data['fantasy_content']['team']
-            
-            # Navigate through the nested structure
-            if isinstance(team_data, list):
-                for item in team_data:
-                    if isinstance(item, dict) and 'roster' in item:
-                        roster_obj = item['roster']
-                        
-                        # Get players from roster
-                        if '0' in roster_obj and 'players' in roster_obj['0']:
-                            players = roster_obj['0']['players']
-                            
-                            for pkey in players:
-                                if pkey == 'count':
-                                    continue
-                                
-                                if 'player' in players[pkey]:
-                                    player_list = players[pkey]['player']
-                                    player_count += 1
-                                    
-                                    selected_pos = ''
-                                    games_played = 0
-                                    player_name = ''
-                                    
-                                    if isinstance(player_list, list):
-                                        # Get selected position and name from first section
-                                        if len(player_list) > 0:
-                                            for pitem in player_list[0]:
-                                                if isinstance(pitem, dict):
-                                                    if 'selected_position' in pitem:
-                                                        selected_pos = pitem['selected_position']
-                                                    if 'name' in pitem:
-                                                        name_obj = pitem['name']
-                                                        if isinstance(name_obj, dict):
-                                                            player_name = name_obj.get('full', '')
-                                        
-                                        # Get stats from player_stats section
-                                        if len(player_list) > 1:
-                                            for section in player_list[1:]:
-                                                if isinstance(section, dict) and 'player_stats' in section:
-                                                    player_stats = section['player_stats']
-                                                    if isinstance(player_stats, dict) and 'stats' in player_stats:
-                                                        for stat in player_stats['stats']:
-                                                            if isinstance(stat, dict) and 'stat' in stat:
-                                                                s = stat['stat']
-                                                                if s.get('stat_id') == '0':  # GP
-                                                                    try:
-                                                                        games_played = int(float(s.get('value', '0')))
-                                                                    except:
-                                                                        games_played = 0
-                                                                    break
-                                    
-                                    if debug:
-                                        print(f"  Player: {player_name}, Pos: {selected_pos}, GP: {games_played}")
-                                    
-                                    # Only count if not on bench or IL
-                                    if selected_pos and selected_pos not in ['BN', 'IL', 'IL+']:
-                                        total_games += games_played
-        
-        if debug:
-            print(f"  Total players: {player_count}, Total games (active): {total_games}")
-        
-        return total_games
-    except Exception as e:
-        print(f"\nError getting games for {team_key} week {week}: {e}")
-        import traceback
-        traceback.print_exc()
-        return 0
-
 for week in range(start_week, min(current_week + 1, end_week + 1)):
     print(f"Week {week}...", end=" ")
     try:
         matchups_data = lg.matchups(week=week)
+        
+        # DEBUG: Print first matchup structure to find games played
+        if week == start_week:
+            import json
+            print("\n=== DEBUG: Full matchup data structure (first 8000 chars) ===")
+            print(json.dumps(matchups_data, indent=2)[:8000])
         
         if isinstance(matchups_data, dict) and 'fantasy_content' in matchups_data:
             content = matchups_data['fantasy_content']
@@ -212,6 +129,7 @@ for week in range(start_week, min(current_week + 1, end_week + 1)):
                                 team1_info = {}
                                 team1_stats = {}
                                 team1_points = 0
+                                team1_games_played = 0
                                 
                                 if isinstance(team1_data, list):
                                     if len(team1_data) > 0:
@@ -228,6 +146,14 @@ for week in range(start_week, min(current_week + 1, end_week + 1)):
                                                         s = stat['stat']
                                                         sid = s.get('stat_id', '')
                                                         sval = s.get('value', '')
+                                                        
+                                                        # stat_id 0 is Games Played (GP)
+                                                        if sid == '0':
+                                                            try:
+                                                                team1_games_played = int(float(sval))
+                                                            except:
+                                                                team1_games_played = 0
+                                                        
                                                         stat_map = {'5': 'fg_pct', '8': 'ft_pct', '10': 'threes', '12': 'pts', '15': 'reb', '16': 'ast', '17': 'stl', '18': 'blk', '19': 'to'}
                                                         if sid in stat_map:
                                                             team1_stats[stat_map[sid]] = sval
@@ -241,6 +167,7 @@ for week in range(start_week, min(current_week + 1, end_week + 1)):
                                 team2_info = {}
                                 team2_stats = {}
                                 team2_points = 0
+                                team2_games_played = 0
                                 
                                 if isinstance(team2_data, list):
                                     if len(team2_data) > 0:
@@ -257,6 +184,14 @@ for week in range(start_week, min(current_week + 1, end_week + 1)):
                                                         s = stat['stat']
                                                         sid = s.get('stat_id', '')
                                                         sval = s.get('value', '')
+                                                        
+                                                        # stat_id 0 is Games Played (GP)
+                                                        if sid == '0':
+                                                            try:
+                                                                team2_games_played = int(float(sval))
+                                                            except:
+                                                                team2_games_played = 0
+                                                        
                                                         stat_map = {'5': 'fg_pct', '8': 'ft_pct', '10': 'threes', '12': 'pts', '15': 'reb', '16': 'ast', '17': 'stl', '18': 'blk', '19': 'to'}
                                                         if sid in stat_map:
                                                             team2_stats[stat_map[sid]] = sval
@@ -279,20 +214,9 @@ for week in range(start_week, min(current_week + 1, end_week + 1)):
                                             if sid in stat_map:
                                                 winners[f'winner_{stat_map[sid]}'] = wkey
                                 
-                                # Get games played for each team
-                                team1_key = team1_info.get('team_key', '')
-                                team2_key = team2_info.get('team_key', '')
-                                
-                                team1_games_played = 0
-                                team2_games_played = 0
-                                
-                                # Enable debug for first matchup only
-                                is_first_matchup = (week == start_week and key == '0')
-                                
-                                if team1_key:
-                                    team1_games_played = get_team_games_played(sc, league_id, team1_key, week, debug=is_first_matchup)
-                                if team2_key:
-                                    team2_games_played = get_team_games_played(sc, league_id, team2_key, week, debug=is_first_matchup)
+                                # DEBUG: Print games played for first matchup
+                                if week == start_week and key == '0':
+                                    print(f"\nDEBUG: Team 1 GP = {team1_games_played}, Team 2 GP = {team2_games_played}")
                                 
                                 all_matchup_records.append({
                                     'week': matchup.get('week', week),
@@ -301,7 +225,7 @@ for week in range(start_week, min(current_week + 1, end_week + 1)):
                                     'status': matchup.get('status', ''),
                                     'is_playoffs': matchup.get('is_playoffs', '0'),
                                     'winner_team_key': matchup.get('winner_team_key', ''),
-                                    'team1_key': team1_key,
+                                    'team1_key': team1_info.get('team_key', ''),
                                     'team1_name': team1_info.get('name', ''),
                                     'team1_points': team1_points,
                                     'team1_games_played': team1_games_played,
@@ -314,7 +238,7 @@ for week in range(start_week, min(current_week + 1, end_week + 1)):
                                     'team1_stl': team1_stats.get('stl', ''),
                                     'team1_blk': team1_stats.get('blk', ''),
                                     'team1_to': team1_stats.get('to', ''),
-                                    'team2_key': team2_key,
+                                    'team2_key': team2_info.get('team_key', ''),
                                     'team2_name': team2_info.get('name', ''),
                                     'team2_points': team2_points,
                                     'team2_games_played': team2_games_played,
@@ -332,7 +256,7 @@ for week in range(start_week, min(current_week + 1, end_week + 1)):
                                     'league_id': league_id
                                 })
         print("✓")
-        time.sleep(1.0)  # Increased sleep time due to additional API calls
+        time.sleep(0.5)  # Rate limit protection
     except Exception as e:
         print(f"✗ {e}")
 

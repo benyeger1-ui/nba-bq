@@ -98,8 +98,8 @@ for week in range(start_week, min(current_week + 1, end_week + 1)):
         # DEBUG: Print first matchup structure to find games played
         if week == start_week:
             import json
-            print("\n=== DEBUG: Full matchup data structure (first 8000 chars) ===")
-            print(json.dumps(matchups_data, indent=2)[:8000])
+            print("\n=== DEBUG: Full matchup data structure (first 20000 chars) ===")
+            print(json.dumps(matchups_data, indent=2)[:20000])
         
         if isinstance(matchups_data, dict) and 'fantasy_content' in matchups_data:
             content = matchups_data['fantasy_content']

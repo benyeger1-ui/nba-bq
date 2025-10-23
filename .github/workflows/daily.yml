@@ -1,8 +1,8 @@
 name: NBA to BigQuery - daily (old script)
 
 on:
-  schedule:
-    - cron: "30 8 * * *"   # every day 08:30 UTC
+  # schedule:
+    # - cron: "30 8 * * *"   # every day 08:30 UTC
   workflow_dispatch: {}     # lets you run it manually
 
 jobs:

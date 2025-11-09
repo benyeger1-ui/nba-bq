@@ -232,6 +232,16 @@ if all_matchup_records:
     df_matchups = pd.DataFrame(all_matchup_records)
     print(f"Total: {len(df_matchups)}")
     
+    # NEW: Added these lines to properly handle data types
+    numeric_cols = ['week', 'team1_points', 'team2_points']
+    for col in numeric_cols:
+        if col in df_matchups.columns:
+            df_matchups[col] = pd.to_numeric(df_matchups[col], errors='coerce').fillna(0)
+    
+    # NEW: Handle is_playoffs as string (it comes as '0' or '1' from Yahoo)
+    if 'is_playoffs' in df_matchups.columns:
+        df_matchups['is_playoffs'] = df_matchups['is_playoffs'].astype(str)
+    
     table_id = f"{project_id}.{dataset}.matchups"
     job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE", autodetect=True)
     job = client.load_table_from_dataframe(df_matchups, table_id, job_config=job_config)

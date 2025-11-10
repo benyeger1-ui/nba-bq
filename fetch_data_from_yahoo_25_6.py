@@ -242,6 +242,47 @@ if all_matchup_records:
     # NEW: Handle is_playoffs as string (it comes as '0' or '1' from Yahoo)
     if 'is_playoffs' in df_matchups.columns:
         df_matchups['is_playoffs'] = df_matchups['is_playoffs'].astype(str)
+
+        # String columns - ensure they're strings or None
+    string_cols = ['week_start', 'week_end', 'status', 'is_playoffs', 
+                   'winner_team_key', 'team1_key', 'team1_name', 
+                   'team2_key', 'team2_name', 'league_id']
+    
+    for col in string_cols:
+        if col in df_matchups.columns:
+            # Convert to string but keep NaN as NaN (not 'nan' string)
+            df_matchups[col] = df_matchups[col].apply(
+                lambda x: str(x) if pd.notna(x) and x != '' else None
+            )
+    
+    # Stats columns - these are the problematic ones
+    # They come as strings from Yahoo but might have mixed types
+    stat_cols = ['team1_fg_pct', 'team1_ft_pct', 'team1_threes', 'team1_pts', 
+                 'team1_reb', 'team1_ast', 'team1_stl', 'team1_blk', 'team1_to',
+                 'team2_fg_pct', 'team2_ft_pct', 'team2_threes', 'team2_pts', 
+                 'team2_reb', 'team2_ast', 'team2_stl', 'team2_blk', 'team2_to']
+    
+    for col in stat_cols:
+        if col in df_matchups.columns:
+            # Convert everything to string type or None
+            df_matchups[col] = df_matchups[col].apply(
+                lambda x: str(x) if x is not None and x != '' else None
+            )
+    
+    # Winner columns - also need to be strings or None
+    winner_cols = [col for col in df_matchups.columns if col.startswith('winner_')]
+    for col in winner_cols:
+        if col in df_matchups.columns:
+            df_matchups[col] = df_matchups[col].apply(
+                lambda x: str(x) if pd.notna(x) and x != '' else None
+            )
+    
+    # Ensure timestamp is datetime
+    df_matchups['extracted_at'] = pd.to_datetime(timestamp)
+    
+    # Debug: Check data types
+    print("Data types after conversion:")
+    print(df_matchups.dtypes)
     
     table_id = f"{project_id}.{dataset}.matchups"
     job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE", autodetect=True)

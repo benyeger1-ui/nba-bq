@@ -282,7 +282,7 @@ def scan_season_range(start_date: str, end_date: str, season_prefix: str, first_
 
     max_days_from_start = max(0, (end_dt - season_start).days)
     max_game_estimate = start_id + (max_days_from_start * 25)
-    end_id = max_game_estimate + 200
+    end_id = max_game_estimate + 500  # Increased from 200 to catch more games
 
     boxscore_errors = 0
     consecutive_errors = 0
@@ -603,15 +603,16 @@ def get_games_for_date(target_date: str) -> pd.DataFrame:
     print(f"\n🎮 Collecting games for {target_date}")
 
     date_mapping = build_date_to_games_mapping(target_date)
-    game_ids = date_mapping.get(target_date, [])
+    game_ids = set(date_mapping.get(target_date, []))
 
     sb_games = fetch_scoreboard_games_for_date(target_date)
     sb_index = {g.get("gameId"): g for g in sb_games if g.get("gameId")}
+    game_ids |= set(sb_index.keys())
 
     collected_games_payloads: List[Dict[str, Any]] = []
 
     # Try to fetch full BoxScore game dicts first
-    for gid in game_ids:
+    for gid in sorted(game_ids):
         try:
             bx = boxscore.BoxScore(gid)
             data = bx.get_dict()
@@ -623,13 +624,6 @@ def get_games_for_date(target_date: str) -> pd.DataFrame:
         # Fallback to schedule info if BoxScore not available yet
         if gid in sb_index:
             collected_games_payloads.append(sb_index[gid])
-
-    # Add ScoreBoard games not in BoxScore mapping
-    for gid, g in sb_index.items():
-        if not any(gid == x.get("gameId") for x in collected_games_payloads):
-            norm = normalize_game_date(g.get("gameTimeUTC", ""), target_date)
-            if norm == target_date:
-                collected_games_payloads.append(g)
 
     if not collected_games_payloads:
         print(f"⚠️  No games found for {target_date}")

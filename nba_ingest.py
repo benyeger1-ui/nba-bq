@@ -379,7 +379,20 @@ def build_optimized_date_range_games_mapping(start_date: str, end_date: str) -> 
     return filtered
 
 def build_date_to_games_mapping(target_date: str) -> Dict[str, List[str]]:
-    return build_optimized_date_range_games_mapping(target_date, target_date)
+    """Build date mapping - falls back to ScoreBoard if BoxScore fails."""
+    mapping = build_optimized_date_range_games_mapping(target_date, target_date)
+    
+    # If BoxScore scan found nothing, try ScoreBoard directly
+    if not mapping or len(mapping.get(target_date, [])) == 0:
+        print(f"📡 BoxScore scan found no games, falling back to ScoreBoard...")
+        sb_games = fetch_scoreboard_games_for_date(target_date)
+        if sb_games:
+            game_ids = [g.get("gameId") for g in sb_games if g.get("gameId")]
+            if game_ids:
+                mapping[target_date] = game_ids
+                print(f"📊 ScoreBoard found {len(game_ids)} games for {target_date}")
+    
+    return mapping
 
 # -----------------------------
 # Data extraction
@@ -667,15 +680,7 @@ def ingest_date_range_nba_live(start_date: str, end_date: str) -> None:
     print(f"\n{'='*70}\n📅 Range ingestion {start_date}..{end_date}\n{'='*70}")
 
     mapping = build_optimized_date_range_games_mapping(start_date, end_date)
-    if not mapping:
-        print("⚠️  No games found in range mapping, trying per-day fallback...")
-        cur = datetime.datetime.fromisoformat(start_date)
-        end = datetime.datetime.fromisoformat(end_date)
-        while cur <= end:
-            ingest_date_nba_live(cur.date().isoformat())
-            cur += datetime.timedelta(days=1)
-        return
-
+    
     # Preload ScoreBoard per date
     sb_by_date: Dict[str, Dict[str, Any]] = {}
     cur = datetime.datetime.fromisoformat(start_date)
@@ -685,6 +690,20 @@ def ingest_date_range_nba_live(start_date: str, end_date: str) -> None:
         sb_games = fetch_scoreboard_games_for_date(ds)
         sb_by_date[ds] = {g.get("gameId"): g for g in sb_games if g.get("gameId")}
         cur += datetime.timedelta(days=1)
+
+    # If mapping is empty, use ScoreBoard for all dates
+    if not mapping:
+        print("⚠️  BoxScore mapping empty, using ScoreBoard for all dates...")
+        mapping = {}
+        for ds, games_dict in sb_by_date.items():
+            if games_dict:
+                mapping[ds] = list(games_dict.keys())
+
+    if not mapping:
+        print("❌ No games found in range")
+        error_tracker.set_stat("games_loaded", 0)
+        error_tracker.set_stat("player_rows_loaded", 0)
+        return
 
     all_game_rows: List[pd.DataFrame] = []
     all_stats_rows: List[pd.DataFrame] = []

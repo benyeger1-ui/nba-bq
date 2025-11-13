@@ -32,6 +32,61 @@ ET_TZ = pytz.timezone("US/Eastern")
 UTC_TZ = pytz.timezone("UTC")
 
 # -----------------------------------
+# Error tracking
+# -----------------------------------
+class IngestionErrorTracker:
+    def __init__(self):
+        self.errors = []
+        self.warnings = []
+        self.stats = {}
+    
+    def add_error(self, error_type: str, context: str, exception: str):
+        self.errors.append({
+            "type": error_type,
+            "context": context,
+            "exception": str(exception)[:200],
+            "timestamp": datetime.datetime.utcnow().isoformat()
+        })
+        print(f"❌ ERROR [{error_type}]: {context} - {exception}")
+    
+    def add_warning(self, warning_type: str, context: str):
+        self.warnings.append({
+            "type": warning_type,
+            "context": context,
+            "timestamp": datetime.datetime.utcnow().isoformat()
+        })
+        print(f"⚠️  WARNING [{warning_type}]: {context}")
+    
+    def set_stat(self, key: str, value: Any):
+        self.stats[key] = value
+        print(f"📊 {key}: {value}")
+    
+    def has_critical_errors(self) -> bool:
+        critical_types = {"boxscore_parse_failure", "bigquery_load_failure", "data_integrity"}
+        return any(e["type"] in critical_types for e in self.errors)
+    
+    def get_summary(self) -> str:
+        summary = f"\n{'='*70}\n🏀 NBA INGESTION SUMMARY\n{'='*70}\n"
+        summary += f"STATS:\n{json.dumps(self.stats, indent=2)}\n"
+        if self.warnings:
+            summary += f"\n⚠️  WARNINGS ({len(self.warnings)}):\n"
+            for w in self.warnings:
+                summary += f"  - {w['type']}: {w['context']}\n"
+        if self.errors:
+            summary += f"\n❌ ERRORS ({len(self.errors)}):\n"
+            for e in self.errors:
+                summary += f"  - {e['type']}: {e['context']}\n    {e['exception']}\n"
+        else:
+            summary += f"\n✅ No critical errors\n"
+        summary += f"{'='*70}\n"
+        return summary
+    
+    def should_exit_with_error(self) -> bool:
+        return self.has_critical_errors()
+
+error_tracker = IngestionErrorTracker()
+
+# -----------------------------------
 # BigQuery schemas
 # -----------------------------------
 GAMES_SCHEMA = [
@@ -155,30 +210,21 @@ def normalize_game_date(game_date_str: str, fallback_date: str) -> str:
 def fetch_scoreboard_games_for_date(date_str: str) -> List[Dict[str, Any]]:
     """
     Fetch ScoreBoard for a specific date. Returns a list of game dicts.
-    This works for past, present, and future dates. If the API only returns
-    current day in your environment, it will gracefully return an empty list.
     """
     try:
-        # nba_api supports optional "game_date" kw. If your installed version
-        # differs, this still works by trying without param or catching errors.
         try:
             sb = scoreboard.ScoreBoard(game_date=date_str)
         except TypeError:
-            # Fallback to no-arg if version does not take game_date
             sb = scoreboard.ScoreBoard()
         data = sb.get_dict()
         games = data.get("scoreboard", {}).get("games", [])
         return games or []
     except Exception as e:
-        print(f"ScoreBoard fetch failed for {date_str}: {e}")
+        error_tracker.add_warning("scoreboard_fetch_failed", f"Date: {date_str}, Error: {str(e)}")
         return []
 
 def score_game_to_row(g: Dict[str, Any], target_date: str) -> Dict[str, Any]:
-    """
-    Map a ScoreBoard game object to a row matching GAMES_SCHEMA.
-    This is used when a game is scheduled or has minimal data.
-    """
-    # Derive season from the ET date
+    """Map a ScoreBoard game object to a row matching GAMES_SCHEMA."""
     game_time_utc = g.get("gameTimeUTC") or ""
     norm_date = normalize_game_date(game_time_utc, target_date)
     year = int(norm_date[:4])
@@ -189,7 +235,6 @@ def score_game_to_row(g: Dict[str, Any], target_date: str) -> Dict[str, Any]:
     away = g.get("awayTeam", {}) or {}
     arena = g.get("arena", {}) or {}
 
-    # Scores might be empty strings for scheduled games
     def zero_if_empty(val):
         try:
             return int(val)
@@ -239,6 +284,7 @@ def scan_season_range(start_date: str, end_date: str, season_prefix: str, first_
     max_game_estimate = start_id + (max_days_from_start * 25)
     end_id = max_game_estimate + 200
 
+    boxscore_errors = 0
     for num in range(start_id, end_id + 1):
         gid = f"{season_prefix}{num:04d}"
         try:
@@ -251,8 +297,21 @@ def scan_season_range(start_date: str, end_date: str, season_prefix: str, first_
                 norm_dt = datetime.datetime.strptime(norm, "%Y-%m-%d")
                 if start_dt <= norm_dt <= end_dt:
                     result.setdefault(norm, []).append(gid)
+        except json.JSONDecodeError as je:
+            boxscore_errors += 1
+            if boxscore_errors > 5:
+                error_tracker.add_error(
+                    "boxscore_parse_failure",
+                    f"Season {season_prefix}: Too many JSON decode errors",
+                    f"Failed on game_id {gid}: {str(je)}"
+                )
+                break
         except Exception:
             continue
+    
+    if boxscore_errors > 0:
+        error_tracker.add_warning("boxscore_fetch_errors", f"Season {season_prefix}: {boxscore_errors} parse errors during scan")
+    
     return result
 
 # -----------------------------
@@ -262,7 +321,7 @@ def build_optimized_date_range_games_mapping(start_date: str, end_date: str) -> 
     """
     Build date -> game IDs using BoxScore scan, then union with ScoreBoard schedule.
     """
-    print(f"Building date mapping for {start_date}..{end_date}")
+    print(f"\n📅 Building date mapping for {start_date}..{end_date}")
     start_dt = datetime.datetime.strptime(start_date, "%Y-%m-%d")
     end_dt = datetime.datetime.strptime(end_date, "%Y-%m-%d")
 
@@ -298,7 +357,6 @@ def build_optimized_date_range_games_mapping(start_date: str, end_date: str) -> 
             gid = g.get("gameId")
             if not gid:
                 continue
-            # derive ET date to place correctly
             norm = normalize_game_date(g.get("gameTimeUTC", ""), ds)
             if norm < start_date or norm > end_date:
                 continue
@@ -312,25 +370,20 @@ def build_optimized_date_range_games_mapping(start_date: str, end_date: str) -> 
         dt = datetime.datetime.strptime(d, "%Y-%m-%d")
         if start_dt <= dt <= end_dt:
             filtered[d] = sorted(set(arr))
+    
+    print(f"📊 Found {sum(len(v) for v in filtered.values())} games across {len(filtered)} dates")
     return filtered
 
 def build_date_to_games_mapping(target_date: str) -> Dict[str, List[str]]:
-    # Use the optimized function for a single date - it already unions schedule
     return build_optimized_date_range_games_mapping(target_date, target_date)
 
 # -----------------------------
 # Data extraction
 # -----------------------------
 def extract_games_from_game_data(games_data: List[Dict[str, Any]], target_date: str) -> pd.DataFrame:
-    """
-    Extract rows from a list of BoxScore-style or ScoreBoard-style game dicts.
-    We rely on key names present in both structures. Missing fields default safely.
-    """
+    """Extract rows from a list of BoxScore-style or ScoreBoard-style game dicts."""
     rows = []
     for game in games_data:
-        # Determine if this is boxscore payload or scoreboard payload
-        is_box = "homeTeam" in game and isinstance(game.get("homeTeam"), dict) and "players" in game.get("homeTeam", {})
-        # Normalize date
         dt_et = normalize_game_date(game.get("gameTimeUTC", ""), target_date)
         year = int(dt_et[:4]); month = int(dt_et[5:7])
         season = year if month >= 10 else year - 1
@@ -345,7 +398,6 @@ def extract_games_from_game_data(games_data: List[Dict[str, Any]], target_date: 
             except Exception:
                 return 0
 
-        # Status text naming is consistent across payloads
         status_text = game.get("gameStatusText") or safe_str(game.get("gameStatus")) or "Scheduled"
 
         rows.append({
@@ -372,9 +424,7 @@ def extract_games_from_game_data(games_data: List[Dict[str, Any]], target_date: 
     return coerce_games_dtypes(df)
 
 def get_player_stats_for_game(game_id: str, date_str: str) -> pd.DataFrame:
-    """
-    Get player stats. If game not started or no stats yet, returns empty df.
-    """
+    """Get player stats. If game not started or no stats yet, returns empty df."""
     max_retries = 2
     for attempt in range(max_retries):
         try:
@@ -432,10 +482,16 @@ def get_player_stats_for_game(game_id: str, date_str: str) -> pd.DataFrame:
                 return pd.DataFrame(columns=[f.name for f in BOX_SCHEMA])
             df = pd.DataFrame(rows)
             return coerce_box_dtypes(df)
-        except Exception as e:
-            if "Expecting value: line 1 column 1" in str(e) and attempt < max_retries - 1:
+        except json.JSONDecodeError as je:
+            if attempt < max_retries - 1:
+                error_tracker.add_warning("boxscore_json_error", f"Game {game_id}: {str(je)}, retrying...")
                 time.sleep(0.5 * (attempt + 1))
                 continue
+            else:
+                error_tracker.add_error("boxscore_parse_failure", f"Game {game_id}", str(je))
+                return pd.DataFrame(columns=[f.name for f in BOX_SCHEMA])
+        except Exception as e:
+            error_tracker.add_warning("boxscore_fetch_error", f"Game {game_id}: {str(e)}")
             return pd.DataFrame(columns=[f.name for f in BOX_SCHEMA])
     return pd.DataFrame(columns=[f.name for f in BOX_SCHEMA])
 
@@ -462,19 +518,25 @@ def ensure_tables() -> None:
     except Exception:
         BQ.create_table(bigquery.Table(box_table_id, schema=BOX_SCHEMA))
 
-def load_df(df: pd.DataFrame, table: str) -> None:
+def load_df(df: pd.DataFrame, table: str) -> bool:
+    """Load dataframe to BigQuery. Returns True if successful."""
     if df is None or df.empty:
-        return
-    table_id = f"{PROJECT_ID}.{DATASET}.{table}"
-    schema = GAMES_SCHEMA if table == "games_daily" else BOX_SCHEMA
-    if "date" in df.columns:
-        df = df.dropna(subset=["date"])
-    job_config = bigquery.LoadJobConfig(
-        schema=schema,
-        write_disposition="WRITE_APPEND",
-        schema_update_options=[bigquery.SchemaUpdateOption.ALLOW_FIELD_ADDITION],
-    )
-    BQ.load_table_from_dataframe(df, table_id, job_config=job_config).result()
+        return True
+    try:
+        table_id = f"{PROJECT_ID}.{DATASET}.{table}"
+        schema = GAMES_SCHEMA if table == "games_daily" else BOX_SCHEMA
+        if "date" in df.columns:
+            df = df.dropna(subset=["date"])
+        job_config = bigquery.LoadJobConfig(
+            schema=schema,
+            write_disposition="WRITE_APPEND",
+            schema_update_options=[bigquery.SchemaUpdateOption.ALLOW_FIELD_ADDITION],
+        )
+        BQ.load_table_from_dataframe(df, table_id, job_config=job_config).result()
+        return True
+    except Exception as e:
+        error_tracker.add_error("bigquery_load_failure", f"Table {table}, rows {len(df)}", str(e))
+        return False
 
 def coerce_games_dtypes(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
@@ -519,17 +581,12 @@ def coerce_box_dtypes(df: pd.DataFrame) -> pd.DataFrame:
 # Game collection by date
 # -----------------------------
 def get_games_for_date(target_date: str) -> pd.DataFrame:
-    """
-    Return a DataFrame of games for target_date.
-    Includes played games and scheduled games.
-    """
-    print(f"Collecting games for {target_date}")
+    """Return a DataFrame of games for target_date."""
+    print(f"\n🎮 Collecting games for {target_date}")
 
-    # Mapping from both BoxScore scan and ScoreBoard schedule
     date_mapping = build_date_to_games_mapping(target_date)
     game_ids = date_mapping.get(target_date, [])
 
-    # Also grab the ScoreBoard payload for scheduled rows fallback
     sb_games = fetch_scoreboard_games_for_date(target_date)
     sb_index = {g.get("gameId"): g for g in sb_games if g.get("gameId")}
 
@@ -549,42 +606,41 @@ def get_games_for_date(target_date: str) -> pd.DataFrame:
         if gid in sb_index:
             collected_games_payloads.append(sb_index[gid])
 
-    # There might be games that were on the ScoreBoard but not in mapping
-    # (in case no BoxScore id matched). Add them too.
+    # Add ScoreBoard games not in BoxScore mapping
     for gid, g in sb_index.items():
-        # Avoid duplicates
         if not any(gid == x.get("gameId") for x in collected_games_payloads):
-            # Make sure it belongs to the ET date
             norm = normalize_game_date(g.get("gameTimeUTC", ""), target_date)
             if norm == target_date:
                 collected_games_payloads.append(g)
 
     if not collected_games_payloads:
-        print(f"No games found for {target_date}")
+        print(f"⚠️  No games found for {target_date}")
         return pd.DataFrame(columns=[f.name for f in GAMES_SCHEMA])
 
-    # Build a DF from either BoxScore or ScoreBoard dicts
     return extract_games_from_game_data(collected_games_payloads, target_date)
 
 # -----------------------------
 # Ingestion flows
 # -----------------------------
 def ingest_date_nba_live(date_str: str) -> None:
-    """Ingest games and stats for a single date. Scheduled games are included in games_daily."""
+    """Ingest games and stats for a single date."""
     ensure_tables()
-    print(f"Starting ingestion for {date_str}")
+    print(f"\n{'='*70}\n🏀 Starting ingestion for {date_str}\n{'='*70}")
 
     games_df = get_games_for_date(date_str)
     if games_df.empty:
-        print(f"No games to load for {date_str}")
+        error_tracker.add_warning("no_games_found", f"Date {date_str}")
+        error_tracker.set_stat("games_loaded", 0)
+        error_tracker.set_stat("player_rows_loaded", 0)
         return
 
-    load_df(games_df, "games_daily")
-    print(f"Loaded {len(games_df)} games to BigQuery for {date_str}")
+    if not load_df(games_df, "games_daily"):
+        return
 
-    # Only attempt player stats for games that likely have stats
-    # We consider statuses that are not Scheduled or Pre Game
-    playable_statuses = set(["Final", "Halftime", "3rd Qtr", "4th Qtr", "End Q1", "End Q2", "End Q3", "In Progress"])
+    error_tracker.set_stat("games_loaded", len(games_df))
+    print(f"✅ Loaded {len(games_df)} games")
+
+    playable_statuses = {"Final", "Halftime", "3rd Qtr", "4th Qtr", "End Q1", "End Q2", "End Q3", "In Progress", "Live"}
     stats_total = 0
     for _, row in games_df.iterrows():
         status = (row.get("status_type") or "").strip()
@@ -593,25 +649,21 @@ def ingest_date_nba_live(date_str: str) -> None:
         gid = row["event_id"]
         ps = get_player_stats_for_game(gid, date_str)
         if not ps.empty:
-            load_df(ps, "player_boxscores")
-            stats_total += len(ps)
+            if load_df(ps, "player_boxscores"):
+                stats_total += len(ps)
             time.sleep(0.3)
-    print(f"Player stats rows loaded: {stats_total}")
+    
+    error_tracker.set_stat("player_rows_loaded", stats_total)
+    print(f"✅ Loaded {stats_total} player stats rows")
 
 def ingest_date_range_nba_live(start_date: str, end_date: str) -> None:
-    """
-    Ingest a date range. For each date:
-    - Merge BoxScore discovered ids with ScoreBoard schedule so scheduled games are included.
-    - Write games_daily for all games.
-    - Write player_boxscores only for games with stats available.
-    """
+    """Ingest a date range."""
     ensure_tables()
-    print(f"Range ingestion {start_date}..{end_date}")
+    print(f"\n{'='*70}\n📅 Range ingestion {start_date}..{end_date}\n{'='*70}")
 
     mapping = build_optimized_date_range_games_mapping(start_date, end_date)
     if not mapping:
-        print("No games found in range mapping")
-        # Still try pure ScoreBoard per day as a fallback
+        print("⚠️  No games found in range mapping, trying per-day fallback...")
         cur = datetime.datetime.fromisoformat(start_date)
         end = datetime.datetime.fromisoformat(end_date)
         while cur <= end:
@@ -619,7 +671,7 @@ def ingest_date_range_nba_live(start_date: str, end_date: str) -> None:
             cur += datetime.timedelta(days=1)
         return
 
-    # Preload ScoreBoard per date for schedule fallback and to ensure scheduled games are included
+    # Preload ScoreBoard per date
     sb_by_date: Dict[str, Dict[str, Any]] = {}
     cur = datetime.datetime.fromisoformat(start_date)
     end = datetime.datetime.fromisoformat(end_date)
@@ -634,7 +686,6 @@ def ingest_date_range_nba_live(start_date: str, end_date: str) -> None:
 
     for ds in sorted(mapping.keys()):
         ids = set(mapping[ds])
-        # union schedule ids too
         ids |= set(sb_by_date.get(ds, {}).keys())
 
         daily_payloads: List[Dict[str, Any]] = []
@@ -653,11 +704,6 @@ def ingest_date_range_nba_live(start_date: str, end_date: str) -> None:
                 if sg:
                     daily_payloads.append(sg)
 
-            # Stats only if boxscore available and not scheduled
-            if used_boxscore:
-                # we will check status later based on payload row
-                pass
-
             time.sleep(0.2)
 
         if daily_payloads:
@@ -665,66 +711,72 @@ def ingest_date_range_nba_live(start_date: str, end_date: str) -> None:
             if not games_df.empty:
                 all_game_rows.append(games_df)
 
-            # Stats only for non-scheduled
-            for _, r in games_df.iterrows():
-                status = (r.get("status_type") or "").strip()
-                if not status or status.lower().startswith("sched") or status.lower().startswith("pre"):
-                    continue
-                gid = r["event_id"]
-                ps = get_player_stats_for_game(gid, ds)
-                if not ps.empty:
-                    all_stats_rows.append(ps)
+                for _, r in games_df.iterrows():
+                    status = (r.get("status_type") or "").strip()
+                    if not status or status.lower().startswith("sched") or status.lower().startswith("pre"):
+                        continue
+                    gid = r["event_id"]
+                    ps = get_player_stats_for_game(gid, ds)
+                    if not ps.empty:
+                        all_stats_rows.append(ps)
 
     if all_game_rows:
         combined_games = pd.concat(all_game_rows, ignore_index=True)
-        load_df(combined_games, "games_daily")
-        print(f"✅ Loaded {len(combined_games)} games across {len(all_game_rows)} days")
+        if load_df(combined_games, "games_daily"):
+            error_tracker.set_stat("games_loaded", len(combined_games))
+            print(f"✅ Loaded {len(combined_games)} games across {len(all_game_rows)} days")
 
     if all_stats_rows:
         combined_stats = pd.concat(all_stats_rows, ignore_index=True)
-        load_df(combined_stats, "player_boxscores")
-        print(f"✅ Loaded {len(combined_stats)} player rows")
+        if load_df(combined_stats, "player_boxscores"):
+            error_tracker.set_stat("player_rows_loaded", len(combined_stats))
+            print(f"✅ Loaded {len(combined_stats)} player rows")
 
-# -----------------------------
+# --------
 # CLI
-# -----------------------------
+# --------
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Ingest NBA data using NBA Live API - includes schedule for unplayed games")
+    parser = argparse.ArgumentParser(description="Ingest NBA data - includes schedule for unplayed games")
     parser.add_argument("--mode", choices=["daily", "backfill"], default="daily")
     parser.add_argument("--start", help="YYYY-MM-DD start date for backfill")
     parser.add_argument("--end", help="YYYY-MM-DD end date for backfill")
     parser.add_argument("--date", help="YYYY-MM-DD specific date")
     args = parser.parse_args()
 
-    if args.date:
-        ingest_date_nba_live(args.date)
-        return
-
-    if args.mode == "daily":
-        yesterday = datetime.date.today() - datetime.timedelta(days=1)
-        ingest_date_nba_live(yesterday.isoformat())
-        return
-
-    if args.mode == "backfill":
-        if not args.start or not args.end:
-            print("Error: backfill requires --start and --end")
+    try:
+        if args.date:
+            ingest_date_nba_live(args.date)
+        elif args.mode == "daily":
+            yesterday = datetime.date.today() - datetime.timedelta(days=1)
+            ingest_date_nba_live(yesterday.isoformat())
+        elif args.mode == "backfill":
+            if not args.start or not args.end:
+                print("Error: backfill requires --start and --end")
+                sys.exit(1)
+            start_date = datetime.date.fromisoformat(args.start)
+            end_date = datetime.date.fromisoformat(args.end)
+            date_diff = (end_date - start_date).days + 1
+            if date_diff <= 60:
+                ingest_date_range_nba_live(args.start, args.end)
+            else:
+                current = start_date
+                while current <= end_date:
+                    chunk_end = min(current + datetime.timedelta(days=59), end_date)
+                    print(f"📦 Chunk {current.isoformat()}..{chunk_end.isoformat()}")
+                    ingest_date_range_nba_live(current.isoformat(), chunk_end.isoformat())
+                    current = chunk_end + datetime.timedelta(days=1)
+                    if current <= end_date:
+                        print("⏳ Sleeping 10 seconds between chunks...")
+                        time.sleep(10)
+            print(f"✅ Backfill complete {args.start}..{args.end}")
+    finally:
+        # Always print summary
+        print(error_tracker.get_summary())
+        
+        # Exit with error code if there were critical errors
+        if error_tracker.should_exit_with_error():
+            print("🚨 EXITING WITH ERROR DUE TO CRITICAL FAILURES")
             sys.exit(1)
-        start_date = datetime.date.fromisoformat(args.start)
-        end_date = datetime.date.fromisoformat(args.end)
-        date_diff = (end_date - start_date).days + 1
-        if date_diff <= 60:
-            ingest_date_range_nba_live(args.start, args.end)
-        else:
-            current = start_date
-            while current <= end_date:
-                chunk_end = min(current + datetime.timedelta(days=59), end_date)
-                print(f"Chunk {current.isoformat()}..{chunk_end.isoformat()}")
-                ingest_date_range_nba_live(current.isoformat(), chunk_end.isoformat())
-                current = chunk_end + datetime.timedelta(days=1)
-                if current <= end_date:
-                    print("Sleeping 10 seconds between chunks...")
-                    time.sleep(10)
-        print(f"Backfill complete {args.start}..{args.end}")
 
 if __name__ == "__main__":
     main()

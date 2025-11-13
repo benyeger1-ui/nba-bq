@@ -62,7 +62,7 @@ class IngestionErrorTracker:
         print(f"📊 {key}: {value}")
     
     def has_critical_errors(self) -> bool:
-        critical_types = {"boxscore_parse_failure", "bigquery_load_failure", "data_integrity"}
+        critical_types = {"bigquery_load_failure", "data_integrity"}
         return any(e["type"] in critical_types for e in self.errors)
     
     def get_summary(self) -> str:
@@ -492,7 +492,8 @@ def get_player_stats_for_game(game_id: str, date_str: str) -> pd.DataFrame:
                 time.sleep(0.5 * (attempt + 1))
                 continue
             else:
-                error_tracker.add_error("boxscore_parse_failure", f"Game {game_id}", str(je))
+                # Don't log as critical error - just warning
+                error_tracker.add_warning("boxscore_json_error", f"Game {game_id}: Data not available yet - {str(je)}")
                 return pd.DataFrame(columns=[f.name for f in BOX_SCHEMA])
         except Exception as e:
             error_tracker.add_warning("boxscore_fetch_error", f"Game {game_id}: {str(e)}")

@@ -285,6 +285,7 @@ def scan_season_range(start_date: str, end_date: str, season_prefix: str, first_
     end_id = max_game_estimate + 200
 
     boxscore_errors = 0
+    consecutive_errors = 0
     for num in range(start_id, end_id + 1):
         gid = f"{season_prefix}{num:04d}"
         try:
@@ -297,20 +298,23 @@ def scan_season_range(start_date: str, end_date: str, season_prefix: str, first_
                 norm_dt = datetime.datetime.strptime(norm, "%Y-%m-%d")
                 if start_dt <= norm_dt <= end_dt:
                     result.setdefault(norm, []).append(gid)
+            consecutive_errors = 0  # Reset on success
         except json.JSONDecodeError as je:
             boxscore_errors += 1
-            if boxscore_errors > 5:
-                error_tracker.add_error(
-                    "boxscore_parse_failure",
-                    f"Season {season_prefix}: Too many JSON decode errors",
-                    f"Failed on game_id {gid}: {str(je)}"
+            consecutive_errors += 1
+            # Only warn if 10+ consecutive errors (indicates real problem)
+            if consecutive_errors > 10:
+                error_tracker.add_warning(
+                    "boxscore_api_issues",
+                    f"Season {season_prefix}: 10+ consecutive JSON errors - NBA API may be having issues"
                 )
                 break
         except Exception:
+            consecutive_errors = 0  # Reset on other exceptions
             continue
     
-    if boxscore_errors > 0:
-        error_tracker.add_warning("boxscore_fetch_errors", f"Season {season_prefix}: {boxscore_errors} parse errors during scan")
+    if boxscore_errors > 0 and consecutive_errors <= 10:
+        error_tracker.add_warning("boxscore_fetch_errors", f"Season {season_prefix}: {boxscore_errors} JSON parse errors (transient, continuing)")
     
     return result
 

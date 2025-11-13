@@ -2,7 +2,7 @@ name: Daily Fantasy Data Update Yahoo 2025/26 myballs
 
 on:
   schedule:
-    - cron: '0 6 * * *'  # Fixed: was '0 6 * **', needs 5 fields
+    - cron: '0 8 * * *'  # Fixed: was '0 8 * **', needs 5 fields
   workflow_dispatch:
 
 jobs:

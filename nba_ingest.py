@@ -302,19 +302,14 @@ def scan_season_range(start_date: str, end_date: str, season_prefix: str, first_
         except json.JSONDecodeError as je:
             boxscore_errors += 1
             consecutive_errors += 1
-            # Only warn if 10+ consecutive errors (indicates real problem)
-            if consecutive_errors > 10:
-                error_tracker.add_warning(
-                    "boxscore_api_issues",
-                    f"Season {season_prefix}: 10+ consecutive JSON errors - NBA API may be having issues"
-                )
-                break
+            # Just continue - don't break the scan
+            continue
         except Exception:
             consecutive_errors = 0  # Reset on other exceptions
             continue
     
-    if boxscore_errors > 0 and consecutive_errors <= 10:
-        error_tracker.add_warning("boxscore_fetch_errors", f"Season {season_prefix}: {boxscore_errors} JSON parse errors (transient, continuing)")
+    if boxscore_errors > 10:
+        error_tracker.add_warning("boxscore_api_issues", f"Season {season_prefix}: {boxscore_errors} JSON errors but continuing scan anyway")
     
     return result
 
@@ -445,11 +440,39 @@ def get_player_stats_for_game(game_id: str, date_str: str) -> pd.DataFrame:
     max_retries = 2
     for attempt in range(max_retries):
         try:
+            # First try nba_api
             bx = boxscore.BoxScore(game_id)
             data = bx.get_dict()
-            if "game" not in data:
-                return pd.DataFrame(columns=[f.name for f in BOX_SCHEMA])
+            if "game" not in data or not data["game"]:
+                # nba_api returned empty - try direct URL
+                raise ValueError("Empty response from nba_api")
             game_info = data["game"]
+        except Exception as e:
+            if attempt == 0:
+                # Try direct NBA API URL as fallback
+                try:
+                    import requests
+                    url = f"https://cdn.nba.com/static/json/liveData/boxscore/boxscore_{game_id}.json"
+                    resp = requests.get(url, timeout=5)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        if "game" in data and data["game"]:
+                            game_info = data["game"]
+                        else:
+                            return pd.DataFrame(columns=[f.name for f in BOX_SCHEMA])
+                    else:
+                        return pd.DataFrame(columns=[f.name for f in BOX_SCHEMA])
+                except Exception:
+                    if attempt < max_retries - 1:
+                        time.sleep(0.5)
+                        continue
+                    else:
+                        return pd.DataFrame(columns=[f.name for f in BOX_SCHEMA])
+            else:
+                return pd.DataFrame(columns=[f.name for f in BOX_SCHEMA])
+
+        # Extract player stats
+        try:
             year = int(date_str[:4])
             month = int(date_str[5:7])
             season = year if month >= 10 else year - 1
@@ -492,25 +515,17 @@ def get_player_stats_for_game(game_id: str, date_str: str) -> pd.DataFrame:
                         "dreb": safe_int(stats.get("reboundsDefensive", 0)),
                         "pf": safe_int(stats.get("foulsPersonal", 0)),
                         "plus_minus": safe_float(stats.get("plusMinusPoints", 0)),
-                        "position": p.get("position"),
+                        "position": p.get("position", ""),
                         "jersey_num": p.get("jerseyNum"),
                     })
             if not rows:
                 return pd.DataFrame(columns=[f.name for f in BOX_SCHEMA])
             df = pd.DataFrame(rows)
             return coerce_box_dtypes(df)
-        except json.JSONDecodeError as je:
-            if attempt < max_retries - 1:
-                error_tracker.add_warning("boxscore_json_error", f"Game {game_id}: {str(je)}, retrying...")
-                time.sleep(0.5 * (attempt + 1))
-                continue
-            else:
-                # Don't log as critical error - just warning
-                error_tracker.add_warning("boxscore_json_error", f"Game {game_id}: Data not available yet - {str(je)}")
-                return pd.DataFrame(columns=[f.name for f in BOX_SCHEMA])
         except Exception as e:
-            error_tracker.add_warning("boxscore_fetch_error", f"Game {game_id}: {str(e)}")
+            error_tracker.add_warning("boxscore_json_error", f"Game {game_id}: Error extracting stats - {str(e)}")
             return pd.DataFrame(columns=[f.name for f in BOX_SCHEMA])
+    
     return pd.DataFrame(columns=[f.name for f in BOX_SCHEMA])
 
 # -----------------------------

@@ -21,7 +21,7 @@ print("Connected to BigQuery!")
 print("\nStep 3: Getting your NBA fantasy league...")
 gm = game.Game(sc, 'nba')
 
-league_id = '466.l.167610'  # CURRENT LEAGUE
+league_id = '466.l.165243'  # CURRENT LEAGUE
 lg = league.League(sc, league_id)
 print("Found your league!")
 

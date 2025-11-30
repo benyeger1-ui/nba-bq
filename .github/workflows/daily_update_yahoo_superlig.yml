@@ -28,7 +28,7 @@ jobs:
       env:
         GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
         GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
-        BQ_DATASET_NBA_YAHOO_ZILBER: ${{ secrets.BQ_DATASET_NBA_YAHOO_SUPERLIG }}
+        BQ_DATASET_NBA_YAHOO_SUPERLIG: ${{ secrets.BQ_DATASET_NBA_YAHOO_SUPERLIG }}
         YAHOO_CLIENT_ID: ${{ secrets.YAHOO_CLIENT_ID }}
         YAHOO_CLIENT_SECRET: ${{ secrets.YAHOO_CLIENT_SECRET }}
         YAHOO_OAUTH_TOKEN: ${{ secrets.YAHOO_OAUTH_TOKEN }}
@@ -40,7 +40,7 @@ jobs:
       env:
         GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
         GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
-        BQ_DATASET_NBA_YAHOO_ZILBER: ${{ secrets.BQ_DATASET_NBA_YAHOO_SUPERLIG }}
+        BQ_DATASET_NBA_YAHOO_SUPERLIG: ${{ secrets.BQ_DATASET_NBA_YAHOO_SUPERLIG }}
         YAHOO_OAUTH_TOKEN: ${{ secrets.YAHOO_OAUTH_TOKEN }}
       run: |
-        python fetch_data_from_yahoo_OUTSIDERS.py
+        python fetch_data_from_yahoo_superleague.py

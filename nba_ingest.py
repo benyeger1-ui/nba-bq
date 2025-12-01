@@ -62,7 +62,7 @@ class IngestionErrorTracker:
         print(f"📊 {key}: {value}")
     
     def has_critical_errors(self) -> bool:
-        critical_types = {"bigquery_load_failure", "data_integrity", "no_games_found", "future_date"}
+        critical_types = {"bigquery_load_failure", "data_integrity", "no_games_found", "future_date", "wrong_date_data"}
         return any(e["type"] in critical_types for e in self.errors)
     
     def get_summary(self) -> str:
@@ -218,6 +218,15 @@ def fetch_scoreboard_games_for_date(date_str: str) -> List[Dict[str, Any]]:
             sb = scoreboard.ScoreBoard()
         data = sb.get_dict()
         games = data.get("scoreboard", {}).get("games", [])
+        
+        # Debug: print what dates the API is actually returning
+        if games:
+            print(f"   📅 ScoreBoard returned {len(games)} games:")
+            for g in games[:3]:  # Show first 3
+                game_date_utc = g.get("gameTimeUTC", "")
+                status = g.get("gameStatusText", "")
+                print(f"      - gameTimeUTC: {game_date_utc}, status: {status}")
+        
         return games or []
     except Exception as e:
         error_tracker.add_warning("scoreboard_fetch_failed", f"Date: {date_str}, Error: {str(e)}")
@@ -653,13 +662,24 @@ def get_games_for_date(target_date: str) -> pd.DataFrame:
             bx = boxscore.BoxScore(gid)
             data = bx.get_dict()
             if "game" in data:
-                collected_games_payloads.append(data["game"])
+                game = data["game"]
+                # Check if this game's date actually matches our target
+                game_date = normalize_game_date(game.get("gameTimeUTC", ""), target_date)
+                if game_date == target_date:
+                    collected_games_payloads.append(game)
+                else:
+                    print(f"   ⚠️  Game {gid} is for {game_date}, not {target_date} - skipping")
                 continue
         except Exception:
             pass
         # Fallback to schedule info if BoxScore not available yet
         if gid in sb_index:
-            collected_games_payloads.append(sb_index[gid])
+            game = sb_index[gid]
+            game_date = normalize_game_date(game.get("gameTimeUTC", ""), target_date)
+            if game_date == target_date:
+                collected_games_payloads.append(game)
+            else:
+                print(f"   ⚠️  Game {gid} is for {game_date}, not {target_date} - skipping")
 
     if not collected_games_payloads:
         print(f"⚠️  No games found for {target_date}")
@@ -674,6 +694,16 @@ def ingest_date_nba_live(date_str: str) -> None:
     """Ingest games and stats for a single date."""
     ensure_tables()
     print(f"\n{'='*70}\n🏀 Starting ingestion for {date_str}\n{'='*70}")
+    
+    # Check if we're trying to ingest yesterday's data too early
+    target_date = datetime.datetime.strptime(date_str, "%Y-%m-%d").date()
+    today = datetime.date.today()
+    now_et = datetime.datetime.now(ET_TZ)
+    
+    # If target is yesterday and it's before 6 AM ET today, the data might not be ready
+    if target_date == today - datetime.timedelta(days=1) and now_et.hour < 6:
+        print(f"⏰ It's only {now_et.hour}:{now_et.minute:02d} AM ET - yesterday's games may not be finalized yet")
+        print(f"💡 Recommended: Run this ingestion after 6 AM ET")
 
     games_df = get_games_for_date(date_str)
     if games_df.empty:
@@ -703,6 +733,7 @@ def ingest_date_nba_live(date_str: str) -> None:
     playable_statuses = {"Final", "Halftime", "3rd Qtr", "4th Qtr", "End Q1", "End Q2", "End Q3", "In Progress", "Live"}
     stats_total = 0
     skipped_count = 0
+    scheduled_count = 0
     
     for _, row in games_df.iterrows():
         status = (row.get("status_type") or "").strip()
@@ -713,9 +744,16 @@ def ingest_date_nba_live(date_str: str) -> None:
         away = row.get("away_abbr", "?")
         print(f"🏀 Game {gid}: {away} @ {home} - Status: '{status}'")
         
-        if not status or status.lower().startswith("sched") or status.lower().startswith("pre"):
-            print(f"   ⏭️  Skipping (not started)")
+        # Skip games that haven't started yet
+        # Check for: "Scheduled", "Pre-Game", time formats like "7:00 pm ET", or empty status
+        if (not status or 
+            status.lower().startswith("sched") or 
+            status.lower().startswith("pre") or
+            "pm ET" in status or 
+            "am ET" in status):
+            print(f"   ⏭️  Skipping (not started - scheduled for {status})")
             skipped_count += 1
+            scheduled_count += 1
             continue
             
         print(f"   📊 Fetching player stats...")
@@ -729,6 +767,13 @@ def ingest_date_nba_live(date_str: str) -> None:
             print(f"   ⚠️  No player stats returned")
     
     print(f"\n📈 Summary: {len(games_df)} games, {skipped_count} skipped, {stats_total} player rows loaded")
+    
+    # If ALL games were skipped because they're scheduled (not started), that's suspicious
+    if scheduled_count == len(games_df) and scheduled_count > 0:
+        error_tracker.add_error("wrong_date_data", 
+                               f"All {scheduled_count} games for {date_str} show as 'not started'", 
+                               "API may be returning wrong date's schedule or data not finalized yet")
+    
     error_tracker.set_stat("player_rows_loaded", stats_total)
     print(f"✅ Loaded {stats_total} player stats rows")
 

@@ -210,21 +210,10 @@ def normalize_game_date(game_date_str: str, fallback_date: str) -> str:
 def fetch_scoreboard_games_for_date(date_str: str) -> List[Dict[str, Any]]:
     """
     Fetch ScoreBoard for a specific date. Returns a list of game dicts.
-    
-    NOTE: NBA ScoreBoard API has a timezone bug where querying for date X 
-    returns games from date X+1. We work around this by querying X-1.
     """
     try:
-        # WORKAROUND: Query for the day BEFORE to get the correct day's games
-        # This is due to a timezone handling bug in the NBA API
-        target_dt = datetime.datetime.strptime(date_str, "%Y-%m-%d")
-        query_dt = target_dt - datetime.timedelta(days=1)
-        query_date_str = query_dt.strftime("%Y-%m-%d")
-        
-        print(f"   🔧 Querying NBA API for {query_date_str} to get {date_str} games (API timezone bug workaround)")
-        
         try:
-            sb = scoreboard.ScoreBoard(game_date=query_date_str)
+            sb = scoreboard.ScoreBoard(game_date=date_str)
         except TypeError:
             sb = scoreboard.ScoreBoard()
         data = sb.get_dict()
@@ -408,8 +397,23 @@ def build_optimized_date_range_games_mapping(start_date: str, end_date: str) -> 
     return filtered
 
 def build_date_to_games_mapping(target_date: str) -> Dict[str, List[str]]:
-    """Build date mapping - uses ScoreBoard first, BoxScore as backup."""
-    # Try ScoreBoard first - it's much faster and more reliable
+    """Build date mapping - uses BoxScore scan for historical data."""
+    
+    # For past dates, DON'T use ScoreBoard - it returns wrong data
+    # Use BoxScore scan which is reliable for completed games
+    today = datetime.date.today()
+    target = datetime.datetime.strptime(target_date, "%Y-%m-%d").date()
+    
+    if target < today:
+        print(f"📡 Using BoxScore scan for past date {target_date}...")
+        mapping = build_optimized_date_range_games_mapping(target_date, target_date)
+        if mapping and mapping.get(target_date):
+            print(f"✅ BoxScore found {len(mapping[target_date])} games")
+            return mapping
+        else:
+            print(f"⚠️ BoxScore found no games, trying ScoreBoard as fallback...")
+    
+    # For today/future, or if BoxScore failed, try ScoreBoard
     print(f"📡 Fetching games from ScoreBoard for {target_date}...")
     sb_games = fetch_scoreboard_games_for_date(target_date)
     
@@ -419,11 +423,7 @@ def build_date_to_games_mapping(target_date: str) -> Dict[str, List[str]]:
             print(f"✅ ScoreBoard found {len(game_ids)} games")
             return {target_date: game_ids}
     
-    # ScoreBoard failed - fall back to BoxScore scan
-    print(f"⚠️  ScoreBoard failed, falling back to BoxScore scan...")
-    mapping = build_optimized_date_range_games_mapping(target_date, target_date)
-    
-    return mapping
+    return {}
 
 # -----------------------------
 # Data extraction

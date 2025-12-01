@@ -210,10 +210,21 @@ def normalize_game_date(game_date_str: str, fallback_date: str) -> str:
 def fetch_scoreboard_games_for_date(date_str: str) -> List[Dict[str, Any]]:
     """
     Fetch ScoreBoard for a specific date. Returns a list of game dicts.
+    
+    NOTE: NBA ScoreBoard API has a timezone bug where querying for date X 
+    returns games from date X+1. We work around this by querying X-1.
     """
     try:
+        # WORKAROUND: Query for the day BEFORE to get the correct day's games
+        # This is due to a timezone handling bug in the NBA API
+        target_dt = datetime.datetime.strptime(date_str, "%Y-%m-%d")
+        query_dt = target_dt - datetime.timedelta(days=1)
+        query_date_str = query_dt.strftime("%Y-%m-%d")
+        
+        print(f"   🔧 Querying NBA API for {query_date_str} to get {date_str} games (API timezone bug workaround)")
+        
         try:
-            sb = scoreboard.ScoreBoard(game_date=date_str)
+            sb = scoreboard.ScoreBoard(game_date=query_date_str)
         except TypeError:
             sb = scoreboard.ScoreBoard()
         data = sb.get_dict()
@@ -225,7 +236,9 @@ def fetch_scoreboard_games_for_date(date_str: str) -> List[Dict[str, Any]]:
             for g in games[:3]:  # Show first 3
                 game_date_utc = g.get("gameTimeUTC", "")
                 status = g.get("gameStatusText", "")
-                print(f"      - gameTimeUTC: {game_date_utc}, status: {status}")
+                # Normalize to see what ET date this actually is
+                normalized_date = normalize_game_date(game_date_utc, date_str)
+                print(f"      - gameTimeUTC: {game_date_utc}, normalizes to: {normalized_date}, status: {status}")
         
         return games or []
     except Exception as e:

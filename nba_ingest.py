@@ -459,6 +459,7 @@ def get_player_stats_for_game(game_id: str, date_str: str) -> pd.DataFrame:
             data = bx.get_dict()
             if "game" not in data or not data["game"]:
                 # nba_api returned empty - try direct URL
+                print(f"      ⚠️  nba_api returned empty for {game_id}, trying direct URL...")
                 raise ValueError("Empty response from nba_api")
             game_info = data["game"]
         except Exception as e:
@@ -467,22 +468,28 @@ def get_player_stats_for_game(game_id: str, date_str: str) -> pd.DataFrame:
                 try:
                     import requests
                     url = f"https://cdn.nba.com/static/json/liveData/boxscore/boxscore_{game_id}.json"
+                    print(f"      🌐 Fetching {url}...")
                     resp = requests.get(url, timeout=5)
                     if resp.status_code == 200:
                         data = resp.json()
                         if "game" in data and data["game"]:
                             game_info = data["game"]
+                            print(f"      ✅ Direct URL worked")
                         else:
+                            print(f"      ❌ Direct URL returned empty game data")
                             return pd.DataFrame(columns=[f.name for f in BOX_SCHEMA])
                     else:
+                        print(f"      ❌ Direct URL returned status {resp.status_code}")
                         return pd.DataFrame(columns=[f.name for f in BOX_SCHEMA])
-                except Exception:
+                except Exception as ex:
+                    print(f"      ❌ Direct URL failed: {str(ex)[:100]}")
                     if attempt < max_retries - 1:
                         time.sleep(0.5)
                         continue
                     else:
                         return pd.DataFrame(columns=[f.name for f in BOX_SCHEMA])
             else:
+                print(f"      ❌ All attempts failed for {game_id}")
                 return pd.DataFrame(columns=[f.name for f in BOX_SCHEMA])
 
         # Extract player stats
@@ -695,17 +702,33 @@ def ingest_date_nba_live(date_str: str) -> None:
 
     playable_statuses = {"Final", "Halftime", "3rd Qtr", "4th Qtr", "End Q1", "End Q2", "End Q3", "In Progress", "Live"}
     stats_total = 0
+    skipped_count = 0
+    
     for _, row in games_df.iterrows():
         status = (row.get("status_type") or "").strip()
-        if not status or status.lower().startswith("sched") or status.lower().startswith("pre"):
-            continue
         gid = row["event_id"]
+        
+        # Debug: print each game's status
+        home = row.get("home_abbr", "?")
+        away = row.get("away_abbr", "?")
+        print(f"🏀 Game {gid}: {away} @ {home} - Status: '{status}'")
+        
+        if not status or status.lower().startswith("sched") or status.lower().startswith("pre"):
+            print(f"   ⏭️  Skipping (not started)")
+            skipped_count += 1
+            continue
+            
+        print(f"   📊 Fetching player stats...")
         ps = get_player_stats_for_game(gid, date_str)
         if not ps.empty:
             if load_df(ps, "player_boxscores"):
                 stats_total += len(ps)
+                print(f"   ✅ Loaded {len(ps)} player rows")
             time.sleep(0.3)
+        else:
+            print(f"   ⚠️  No player stats returned")
     
+    print(f"\n📈 Summary: {len(games_df)} games, {skipped_count} skipped, {stats_total} player rows loaded")
     error_tracker.set_stat("player_rows_loaded", stats_total)
     print(f"✅ Loaded {stats_total} player stats rows")
 

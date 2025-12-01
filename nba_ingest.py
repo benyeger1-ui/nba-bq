@@ -62,7 +62,7 @@ class IngestionErrorTracker:
         print(f"📊 {key}: {value}")
     
     def has_critical_errors(self) -> bool:
-        critical_types = {"bigquery_load_failure", "data_integrity"}
+        critical_types = {"bigquery_load_failure", "data_integrity", "no_games_found", "future_date"}
         return any(e["type"] in critical_types for e in self.errors)
     
     def get_summary(self) -> str:
@@ -286,6 +286,8 @@ def scan_season_range(start_date: str, end_date: str, season_prefix: str, first_
 
     boxscore_errors = 0
     consecutive_errors = 0
+    successful_fetches = 0
+    
     for num in range(start_id, end_id + 1):
         gid = f"{season_prefix}{num:04d}"
         try:
@@ -298,11 +300,21 @@ def scan_season_range(start_date: str, end_date: str, season_prefix: str, first_
                 norm_dt = datetime.datetime.strptime(norm, "%Y-%m-%d")
                 if start_dt <= norm_dt <= end_dt:
                     result.setdefault(norm, []).append(gid)
+                successful_fetches += 1
             consecutive_errors = 0  # Reset on success
+            
+            # Rate limiting: sleep after every 10 successful fetches
+            if successful_fetches > 0 and successful_fetches % 10 == 0:
+                time.sleep(0.5)
+                
         except json.JSONDecodeError as je:
             boxscore_errors += 1
             consecutive_errors += 1
-            # Just continue - don't break the scan
+            # If too many consecutive errors, API might be down - stop early
+            if consecutive_errors > 100:
+                error_tracker.add_warning("boxscore_consecutive_failures", 
+                    f"Season {season_prefix}: 100+ consecutive errors, stopping scan early")
+                break
             continue
         except Exception:
             consecutive_errors = 0  # Reset on other exceptions
@@ -374,18 +386,20 @@ def build_optimized_date_range_games_mapping(start_date: str, end_date: str) -> 
     return filtered
 
 def build_date_to_games_mapping(target_date: str) -> Dict[str, List[str]]:
-    """Build date mapping - falls back to ScoreBoard if BoxScore fails."""
-    mapping = build_optimized_date_range_games_mapping(target_date, target_date)
+    """Build date mapping - uses ScoreBoard first, BoxScore as backup."""
+    # Try ScoreBoard first - it's much faster and more reliable
+    print(f"📡 Fetching games from ScoreBoard for {target_date}...")
+    sb_games = fetch_scoreboard_games_for_date(target_date)
     
-    # If BoxScore scan found nothing, try ScoreBoard directly
-    if not mapping or len(mapping.get(target_date, [])) == 0:
-        print(f"📡 BoxScore scan found no games, falling back to ScoreBoard...")
-        sb_games = fetch_scoreboard_games_for_date(target_date)
-        if sb_games:
-            game_ids = [g.get("gameId") for g in sb_games if g.get("gameId")]
-            if game_ids:
-                mapping[target_date] = game_ids
-                print(f"📊 ScoreBoard found {len(game_ids)} games for {target_date}")
+    if sb_games:
+        game_ids = [g.get("gameId") for g in sb_games if g.get("gameId")]
+        if game_ids:
+            print(f"✅ ScoreBoard found {len(game_ids)} games")
+            return {target_date: game_ids}
+    
+    # ScoreBoard failed - fall back to BoxScore scan
+    print(f"⚠️  ScoreBoard failed, falling back to BoxScore scan...")
+    mapping = build_optimized_date_range_games_mapping(target_date, target_date)
     
     return mapping
 
@@ -656,7 +670,19 @@ def ingest_date_nba_live(date_str: str) -> None:
 
     games_df = get_games_for_date(date_str)
     if games_df.empty:
-        error_tracker.add_warning("no_games_found", f"Date {date_str}")
+        # Check if this was API failure or genuinely no games
+        # If we got warnings about scoreboard/boxscore failures, it's an API issue
+        api_failures = [w for w in error_tracker.warnings 
+                       if w["type"] in ["scoreboard_fetch_failed", "boxscore_api_issues"]]
+        
+        if api_failures:
+            error_tracker.add_error("no_games_found", 
+                                   f"Date {date_str} - API failures detected", 
+                                   f"{len(api_failures)} API errors, likely not a legitimate no-game day")
+        else:
+            # Legitimate no-game day (or off-season)
+            print(f"ℹ️  No games scheduled for {date_str} (this may be normal)")
+        
         error_tracker.set_stat("games_loaded", 0)
         error_tracker.set_stat("player_rows_loaded", 0)
         return
@@ -710,6 +736,7 @@ def ingest_date_range_nba_live(start_date: str, end_date: str) -> None:
 
     if not mapping:
         print("❌ No games found in range")
+        error_tracker.add_error("no_games_found", f"Range {start_date}..{end_date}", "No games returned from API")
         error_tracker.set_stat("games_loaded", 0)
         error_tracker.set_stat("player_rows_loaded", 0)
         return
@@ -758,12 +785,17 @@ def ingest_date_range_nba_live(start_date: str, end_date: str) -> None:
         if load_df(combined_games, "games_daily"):
             error_tracker.set_stat("games_loaded", len(combined_games))
             print(f"✅ Loaded {len(combined_games)} games across {len(all_game_rows)} days")
+    else:
+        error_tracker.add_error("no_games_found", f"Range {start_date}..{end_date}", "No game data extracted")
+        error_tracker.set_stat("games_loaded", 0)
 
     if all_stats_rows:
         combined_stats = pd.concat(all_stats_rows, ignore_index=True)
         if load_df(combined_stats, "player_boxscores"):
             error_tracker.set_stat("player_rows_loaded", len(combined_stats))
             print(f"✅ Loaded {len(combined_stats)} player rows")
+    else:
+        error_tracker.set_stat("player_rows_loaded", 0)
 
 # --------
 # CLI
@@ -777,17 +809,33 @@ def main() -> None:
     args = parser.parse_args()
 
     try:
+        # Validate dates are not in the future
+        today = datetime.date.today()
+        
         if args.date:
+            target_date = datetime.date.fromisoformat(args.date)
+            if target_date > today:
+                error_tracker.add_error("future_date", f"Cannot ingest future date {args.date}", f"Today is {today.isoformat()}")
+                print(f"❌ Error: Cannot ingest future date {args.date} (today is {today.isoformat()})")
+                return
             ingest_date_nba_live(args.date)
         elif args.mode == "daily":
-            yesterday = datetime.date.today() - datetime.timedelta(days=1)
+            yesterday = today - datetime.timedelta(days=1)
+            print(f"📅 Ingesting yesterday: {yesterday.isoformat()}")
             ingest_date_nba_live(yesterday.isoformat())
         elif args.mode == "backfill":
             if not args.start or not args.end:
                 print("Error: backfill requires --start and --end")
                 sys.exit(1)
+            
             start_date = datetime.date.fromisoformat(args.start)
             end_date = datetime.date.fromisoformat(args.end)
+            
+            if start_date > today or end_date > today:
+                error_tracker.add_error("future_date", f"Cannot backfill future dates", f"Range {args.start}..{args.end}, today is {today.isoformat()}")
+                print(f"❌ Error: Cannot backfill future dates (today is {today.isoformat()})")
+                return
+            
             date_diff = (end_date - start_date).days + 1
             if date_diff <= 60:
                 ingest_date_range_nba_live(args.start, args.end)

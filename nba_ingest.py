@@ -62,7 +62,7 @@ class IngestionErrorTracker:
         print(f"📊 {key}: {value}")
     
     def has_critical_errors(self) -> bool:
-        critical_types = {"bigquery_load_failure", "data_integrity", "no_games_found", "future_date", "wrong_date_data"}
+        critical_types = {"bigquery_load_failure", "data_integrity", "no_games_found", "future_date", "wrong_date_data", "no_player_stats"}
         return any(e["type"] in critical_types for e in self.errors)
     
     def get_summary(self) -> str:
@@ -786,6 +786,12 @@ def ingest_date_nba_live(date_str: str) -> None:
         error_tracker.add_error("wrong_date_data", 
                                f"All {scheduled_count} games for {date_str} show as 'not started'", 
                                "API may be returning wrong date's schedule or data not finalized yet")
+    
+    # If we loaded games but got 0 player stats, that's a critical error
+    if len(games_df) > 0 and stats_total == 0 and skipped_count < len(games_df):
+        error_tracker.add_error("no_player_stats", 
+                               f"Loaded {len(games_df)} games but 0 player stats", 
+                               f"Games appear to be finished but player data unavailable")
     
     error_tracker.set_stat("player_rows_loaded", stats_total)
     print(f"✅ Loaded {stats_total} player stats rows")

@@ -2,7 +2,7 @@ name: NBA daily box scores
 
 on:
   schedule:
-    - cron: "30 8 * * *"   # 11:30 Israel time most of the year
+    - cron: "30 9 * * *"   # 11:30 Israel time most of the year
   workflow_dispatch:
     inputs:
       mode:

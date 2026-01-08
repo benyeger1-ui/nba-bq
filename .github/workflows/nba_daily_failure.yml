@@ -15,10 +15,10 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Wait 2 hours before retry
+      - name: Wait 5 hours before retry
         run: |
-          echo "⏳ Waiting 2 hours before retry..."
-          sleep 7200
+          echo "⏳ Waiting 5 hours before retry..."
+          sleep 18000
 
       - name: Re-run failed workflow
         env:

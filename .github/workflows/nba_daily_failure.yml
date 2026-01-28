@@ -1,11 +1,9 @@
 name: NBA daily retry on scheduled failure
-
 on:
   workflow_run:
     workflows: ["NBA daily box scores"]
     types:
       - completed
-
 jobs:
   retry:
     if: >
@@ -13,13 +11,15 @@ jobs:
       github.event.workflow_run.event == 'schedule' &&
       github.event.workflow_run.run_attempt == 1
     runs-on: ubuntu-latest
-
     steps:
       - name: Wait 5 hours before retry
         run: |
           echo "⏳ Waiting 5 hours before retry..."
           sleep 18000
-
+      
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
       - name: Re-run failed workflow
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

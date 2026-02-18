@@ -13,34 +13,7 @@ jobs:
       github.event.workflow_run.event == 'schedule'
     runs-on: ubuntu-latest
     steps:
-      - name: Check if this is already a retry
-        id: check
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          # Look for a successful run in the last 24 hours to avoid infinite retries
-          RECENT_SUCCESS=$(gh run list \
-            --workflow "NBA daily box scores" \
-            --status success \
-            --limit 1 \
-            --json createdAt \
-            --jq '.[0].createdAt // ""' \
-            --repo "${{ github.repository }}")
-          
-          if [ -n "$RECENT_SUCCESS" ]; then
-            RECENT_TS=$(date -d "$RECENT_SUCCESS" +%s 2>/dev/null || echo 0)
-            NOW_TS=$(date +%s)
-            DIFF=$(( NOW_TS - RECENT_TS ))
-            if [ "$DIFF" -lt 86400 ]; then
-              echo "✅ Found successful run within 24h, skipping retry"
-              echo "skip=true" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-          fi
-          echo "skip=false" >> "$GITHUB_OUTPUT"
-
       - name: Wait 5 hours before retry
-        if: steps.check.outputs.skip == 'false'
         run: |
           echo "⏳ Waiting 5 hours before retry..."
           for i in $(seq 1 10); do
@@ -50,7 +23,6 @@ jobs:
           echo "✅ Wait complete"
 
       - name: Trigger retry
-        if: steps.check.outputs.skip == 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |

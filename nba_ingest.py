@@ -406,10 +406,10 @@ def build_optimized_date_range_games_mapping(start_date: str, end_date: str) -> 
 
 def build_date_to_games_mapping(target_date: str) -> Dict[str, List[str]]:
     """Build date mapping - uses BoxScore scan for past dates, ScoreBoard for today/future."""
-    today = datetime.date.today()
+    today_et = datetime.datetime.now(ET_TZ).date()
     target = datetime.datetime.strptime(target_date, "%Y-%m-%d").date()
 
-    if target < today:
+    if target < today_et:
         print(f"📡 Using BoxScore scan for past date {target_date}...")
         mapping = build_optimized_date_range_games_mapping(target_date, target_date)
         if mapping and mapping.get(target_date):
@@ -658,6 +658,13 @@ def get_games_for_date(target_date: str) -> pd.DataFrame:
         sb_index = {g.get("gameId"): g for g in sb_games if g.get("gameId")}
         game_ids |= set(sb_index.keys())
 
+    # Build a reverse map: game_id -> date from the scan (may differ from target_date
+    # when the runner's local clock is ahead of ET, e.g. running from Israel)
+    scan_date_for_gid: Dict[str, str] = {}
+    for d, ids in date_mapping.items():
+        for gid in ids:
+            scan_date_for_gid[gid] = d
+
     collected_games_payloads: List[Dict[str, Any]] = []
 
     for gid in sorted(game_ids):
@@ -686,11 +693,15 @@ def get_games_for_date(target_date: str) -> pd.DataFrame:
 
         # 4. Last resort: synthesize a minimal stub so we don't silently lose
         #    a game that the BoxScore scan confirmed exists.
+        #    Use the date from the scan mapping (not target_date) so that games
+        #    played on the ET-previous day are correctly attributed when the
+        #    runner's clock is ahead of ET (e.g. running from Israel).
         if game_data is None:
-            print(f"   ⚠️  All sources failed for {gid}, using minimal stub")
+            stub_date = scan_date_for_gid.get(gid, target_date)
+            print(f"   ⚠️  All sources failed for {gid}, using minimal stub (date={stub_date})")
             game_data = {
                 "gameId": gid,
-                "gameTimeUTC": f"{target_date}T00:00:00Z",
+                "gameTimeUTC": f"{stub_date}T23:00:00Z",  # late-night UTC safely maps to stub_date in ET
                 "gameStatusText": "Final",
                 "homeTeam": {"teamId": None, "teamTricode": None, "score": 0},
                 "awayTeam": {"teamId": None, "teamTricode": None, "score": 0},
@@ -905,7 +916,7 @@ def main() -> None:
     args = parser.parse_args()
 
     try:
-        today = datetime.date.today()
+        today = datetime.datetime.now(ET_TZ).date()  # always ET — runner may be in Israel
 
         if args.date:
             target_date = datetime.date.fromisoformat(args.date)
@@ -915,9 +926,12 @@ def main() -> None:
                 return
             ingest_date_nba_live(args.date)
         elif args.mode == "daily":
-            yesterday = today - datetime.timedelta(days=1)
-            print(f"📅 Ingesting yesterday: {yesterday.isoformat()}")
-            ingest_date_nba_live(yesterday.isoformat())
+            # Always derive "yesterday" in ET — the script may run from Israel (UTC+2/+3)
+            # where it's already the next calendar day relative to ET.
+            now_et = datetime.datetime.now(ET_TZ)
+            yesterday_et = (now_et - datetime.timedelta(days=1)).date()
+            print(f"📅 Ingesting yesterday (ET): {yesterday_et.isoformat()} [local now: {datetime.datetime.now():%Y-%m-%d %H:%M}, ET now: {now_et:%Y-%m-%d %H:%M}]")
+            ingest_date_nba_live(yesterday_et.isoformat())
         elif args.mode == "backfill":
             if not args.start or not args.end:
                 print("Error: backfill requires --start and --end")

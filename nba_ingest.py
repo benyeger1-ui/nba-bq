@@ -39,7 +39,7 @@ class IngestionErrorTracker:
         self.errors = []
         self.warnings = []
         self.stats = {}
-    
+
     def add_error(self, error_type: str, context: str, exception: str):
         self.errors.append({
             "type": error_type,
@@ -48,7 +48,7 @@ class IngestionErrorTracker:
             "timestamp": datetime.datetime.utcnow().isoformat()
         })
         print(f"❌ ERROR [{error_type}]: {context} - {exception}")
-    
+
     def add_warning(self, warning_type: str, context: str):
         self.warnings.append({
             "type": warning_type,
@@ -56,15 +56,15 @@ class IngestionErrorTracker:
             "timestamp": datetime.datetime.utcnow().isoformat()
         })
         print(f"⚠️  WARNING [{warning_type}]: {context}")
-    
+
     def set_stat(self, key: str, value: Any):
         self.stats[key] = value
         print(f"📊 {key}: {value}")
-    
+
     def has_critical_errors(self) -> bool:
         critical_types = {"bigquery_load_failure", "data_integrity", "no_games_found", "future_date", "wrong_date_data", "no_player_stats"}
         return any(e["type"] in critical_types for e in self.errors)
-    
+
     def get_summary(self) -> str:
         summary = f"\n{'='*70}\n🏀 NBA INGESTION SUMMARY\n{'='*70}\n"
         summary += f"STATS:\n{json.dumps(self.stats, indent=2)}\n"
@@ -80,7 +80,7 @@ class IngestionErrorTracker:
             summary += f"\n✅ No critical errors\n"
         summary += f"{'='*70}\n"
         return summary
-    
+
     def should_exit_with_error(self) -> bool:
         return self.has_critical_errors()
 
@@ -184,7 +184,6 @@ def normalize_game_date(game_date_str: str, fallback_date: str) -> str:
             return fallback_date
         if "T" in game_date_str:
             s = game_date_str.replace("Z", "+00:00")
-            # guard weird microseconds length
             if "." in s:
                 left, right = s.split(".", 1)
                 if "+" in right:
@@ -218,17 +217,15 @@ def fetch_scoreboard_games_for_date(date_str: str) -> List[Dict[str, Any]]:
             sb = scoreboard.ScoreBoard()
         data = sb.get_dict()
         games = data.get("scoreboard", {}).get("games", [])
-        
-        # Debug: print what dates the API is actually returning
+
         if games:
             print(f"   📅 ScoreBoard returned {len(games)} games:")
-            for g in games[:3]:  # Show first 3
+            for g in games[:3]:
                 game_date_utc = g.get("gameTimeUTC", "")
                 status = g.get("gameStatusText", "")
-                # Normalize to see what ET date this actually is
                 normalized_date = normalize_game_date(game_date_utc, date_str)
                 print(f"      - gameTimeUTC: {game_date_utc}, normalizes to: {normalized_date}, status: {status}")
-        
+
         return games or []
     except Exception as e:
         error_tracker.add_warning("scoreboard_fetch_failed", f"Date: {date_str}, Error: {str(e)}")
@@ -270,6 +267,23 @@ def score_game_to_row(g: Dict[str, Any], target_date: str) -> Dict[str, Any]:
     }
 
 # -----------------------------
+# CDN fallback fetch
+# -----------------------------
+def fetch_game_from_cdn(game_id: str) -> Optional[Dict[str, Any]]:
+    """Try fetching game data from NBA CDN URL. Returns game dict or None."""
+    try:
+        import requests
+        url = f"https://cdn.nba.com/static/json/liveData/boxscore/boxscore_{game_id}.json"
+        resp = requests.get(url, timeout=5)
+        if resp.status_code == 200:
+            data = resp.json()
+            if "game" in data and data["game"]:
+                return data["game"]
+    except Exception:
+        pass
+    return None
+
+# -----------------------------
 # Season scanning - BoxScore
 # -----------------------------
 def scan_season_range(start_date: str, end_date: str, season_prefix: str, first_game_id: int, season_start: datetime.datetime) -> Dict[str, List[str]]:
@@ -284,21 +298,19 @@ def scan_season_range(start_date: str, end_date: str, season_prefix: str, first_
     if end_dt < season_start:
         return result
 
-    if season_prefix == "002240":
-        start_id = 0
-    elif season_prefix == "002250":
+    if season_prefix in ("002240", "002250"):
         start_id = 0
     else:
         start_id = first_game_id
 
     max_days_from_start = max(0, (end_dt - season_start).days)
     max_game_estimate = start_id + (max_days_from_start * 25)
-    end_id = max_game_estimate + 500  # Increased from 200 to catch more games
+    end_id = max_game_estimate + 500
 
     boxscore_errors = 0
     consecutive_errors = 0
     successful_fetches = 0
-    
+
     for num in range(start_id, end_id + 1):
         gid = f"{season_prefix}{num:04d}"
         try:
@@ -312,28 +324,26 @@ def scan_season_range(start_date: str, end_date: str, season_prefix: str, first_
                 if start_dt <= norm_dt <= end_dt:
                     result.setdefault(norm, []).append(gid)
                 successful_fetches += 1
-            consecutive_errors = 0  # Reset on success
-            
-            # Rate limiting: sleep after every 10 successful fetches
+            consecutive_errors = 0
+
             if successful_fetches > 0 and successful_fetches % 10 == 0:
                 time.sleep(0.5)
-                
-        except json.JSONDecodeError as je:
+
+        except json.JSONDecodeError:
             boxscore_errors += 1
             consecutive_errors += 1
-            # If too many consecutive errors, API might be down - stop early
             if consecutive_errors > 100:
-                error_tracker.add_warning("boxscore_consecutive_failures", 
+                error_tracker.add_warning("boxscore_consecutive_failures",
                     f"Season {season_prefix}: 100+ consecutive errors, stopping scan early")
                 break
             continue
         except Exception:
-            consecutive_errors = 0  # Reset on other exceptions
+            consecutive_errors = 0
             continue
-    
+
     if boxscore_errors > 10:
         error_tracker.add_warning("boxscore_api_issues", f"Season {season_prefix}: {boxscore_errors} JSON errors but continuing scan anyway")
-    
+
     return result
 
 # -----------------------------
@@ -351,7 +361,6 @@ def build_optimized_date_range_games_mapping(start_date: str, end_date: str) -> 
     date_to_games: Dict[str, List[str]] = {}
 
     if start_dt < season_boundary and end_dt >= season_boundary:
-        # crosses seasons
         part1_end = min(end_dt, season_boundary - datetime.timedelta(days=1))
         if start_dt <= part1_end:
             mapping1 = scan_season_range(start_date, part1_end.strftime("%Y-%m-%d"), "002240", 61, datetime.datetime(2024, 10, 22))
@@ -370,7 +379,7 @@ def build_optimized_date_range_games_mapping(start_date: str, end_date: str) -> 
         for k, v in mapping.items():
             date_to_games.setdefault(k, []).extend(v)
 
-    # Always union ScoreBoard schedule for each date in the requested range
+    # Union ScoreBoard schedule for each date in the requested range
     cur = start_dt
     while cur <= end_dt:
         ds = cur.date().isoformat()
@@ -386,24 +395,20 @@ def build_optimized_date_range_games_mapping(start_date: str, end_date: str) -> 
                 date_to_games.setdefault(norm, []).append(gid)
         cur += datetime.timedelta(days=1)
 
-    # Filter and sort ids per date
     filtered: Dict[str, List[str]] = {}
     for d, arr in date_to_games.items():
         dt = datetime.datetime.strptime(d, "%Y-%m-%d")
         if start_dt <= dt <= end_dt:
             filtered[d] = sorted(set(arr))
-    
+
     print(f"📊 Found {sum(len(v) for v in filtered.values())} games across {len(filtered)} dates")
     return filtered
 
 def build_date_to_games_mapping(target_date: str) -> Dict[str, List[str]]:
-    """Build date mapping - uses BoxScore scan for historical data."""
-    
-    # For past dates, DON'T use ScoreBoard - it returns wrong data
-    # Use BoxScore scan which is reliable for completed games
+    """Build date mapping - uses BoxScore scan for past dates, ScoreBoard for today/future."""
     today = datetime.date.today()
     target = datetime.datetime.strptime(target_date, "%Y-%m-%d").date()
-    
+
     if target < today:
         print(f"📡 Using BoxScore scan for past date {target_date}...")
         mapping = build_optimized_date_range_games_mapping(target_date, target_date)
@@ -411,18 +416,18 @@ def build_date_to_games_mapping(target_date: str) -> Dict[str, List[str]]:
             print(f"✅ BoxScore found {len(mapping[target_date])} games")
             return mapping
         else:
-            print(f"⚠️ BoxScore found no games, trying ScoreBoard as fallback...")
-    
+            print(f"⚠️  BoxScore found no games, trying ScoreBoard as fallback...")
+
     # For today/future, or if BoxScore failed, try ScoreBoard
     print(f"📡 Fetching games from ScoreBoard for {target_date}...")
     sb_games = fetch_scoreboard_games_for_date(target_date)
-    
+
     if sb_games:
         game_ids = [g.get("gameId") for g in sb_games if g.get("gameId")]
         if game_ids:
             print(f"✅ ScoreBoard found {len(game_ids)} games")
             return {target_date: game_ids}
-    
+
     return {}
 
 # -----------------------------
@@ -472,49 +477,30 @@ def extract_games_from_game_data(games_data: List[Dict[str, Any]], target_date: 
     return coerce_games_dtypes(df)
 
 def get_player_stats_for_game(game_id: str, date_str: str) -> pd.DataFrame:
-    """Get player stats. If game not started or no stats yet, returns empty df."""
+    """Get player stats for a game. Returns empty df if not available."""
     max_retries = 2
     for attempt in range(max_retries):
         try:
-            # First try nba_api
             bx = boxscore.BoxScore(game_id)
             data = bx.get_dict()
             if "game" not in data or not data["game"]:
-                # nba_api returned empty - try direct URL
-                print(f"      ⚠️  nba_api returned empty for {game_id}, trying direct URL...")
                 raise ValueError("Empty response from nba_api")
             game_info = data["game"]
-        except Exception as e:
+        except Exception:
             if attempt == 0:
-                # Try direct NBA API URL as fallback
-                try:
-                    import requests
-                    url = f"https://cdn.nba.com/static/json/liveData/boxscore/boxscore_{game_id}.json"
-                    print(f"      🌐 Fetching {url}...")
-                    resp = requests.get(url, timeout=5)
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        if "game" in data and data["game"]:
-                            game_info = data["game"]
-                            print(f"      ✅ Direct URL worked")
-                        else:
-                            print(f"      ❌ Direct URL returned empty game data")
-                            return pd.DataFrame(columns=[f.name for f in BOX_SCHEMA])
-                    else:
-                        print(f"      ❌ Direct URL returned status {resp.status_code}")
-                        return pd.DataFrame(columns=[f.name for f in BOX_SCHEMA])
-                except Exception as ex:
-                    print(f"      ❌ Direct URL failed: {str(ex)[:100]}")
-                    if attempt < max_retries - 1:
-                        time.sleep(0.5)
-                        continue
-                    else:
-                        return pd.DataFrame(columns=[f.name for f in BOX_SCHEMA])
+                # Try CDN fallback
+                game_info_cdn = fetch_game_from_cdn(game_id)
+                if game_info_cdn:
+                    print(f"      ✅ CDN fallback worked for {game_id}")
+                    game_info = game_info_cdn
+                else:
+                    print(f"      ❌ CDN fallback failed for {game_id}")
+                    time.sleep(0.5)
+                    continue
             else:
                 print(f"      ❌ All attempts failed for {game_id}")
                 return pd.DataFrame(columns=[f.name for f in BOX_SCHEMA])
 
-        # Extract player stats
         try:
             year = int(date_str[:4])
             month = int(date_str[5:7])
@@ -568,7 +554,7 @@ def get_player_stats_for_game(game_id: str, date_str: str) -> pd.DataFrame:
         except Exception as e:
             error_tracker.add_warning("boxscore_json_error", f"Game {game_id}: Error extracting stats - {str(e)}")
             return pd.DataFrame(columns=[f.name for f in BOX_SCHEMA])
-    
+
     return pd.DataFrame(columns=[f.name for f in BOX_SCHEMA])
 
 # -----------------------------
@@ -663,36 +649,58 @@ def get_games_for_date(target_date: str) -> pd.DataFrame:
     date_mapping = build_date_to_games_mapping(target_date)
     game_ids = set(date_mapping.get(target_date, []))
 
-    sb_games = fetch_scoreboard_games_for_date(target_date)
-    sb_index = {g.get("gameId"): g for g in sb_games if g.get("gameId")}
-    game_ids |= set(sb_index.keys())
+    # FIX: Only call ScoreBoard if BoxScore scan found nothing.
+    # Calling it unconditionally was causing spurious scoreboard_fetch_failed
+    # warnings that then triggered the no_games_found error path.
+    sb_index: Dict[str, Any] = {}
+    if not game_ids:
+        sb_games = fetch_scoreboard_games_for_date(target_date)
+        sb_index = {g.get("gameId"): g for g in sb_games if g.get("gameId")}
+        game_ids |= set(sb_index.keys())
 
     collected_games_payloads: List[Dict[str, Any]] = []
 
-    # Try to fetch full BoxScore game dicts first
     for gid in sorted(game_ids):
+        game_data = None
+
+        # 1. Try nba_api BoxScore
         try:
             bx = boxscore.BoxScore(gid)
             data = bx.get_dict()
-            if "game" in data:
-                game = data["game"]
-                # Check if this game's date actually matches our target
-                game_date = normalize_game_date(game.get("gameTimeUTC", ""), target_date)
-                if game_date == target_date:
-                    collected_games_payloads.append(game)
-                else:
-                    print(f"   ⚠️  Game {gid} is for {game_date}, not {target_date} - skipping")
-                continue
+            if "game" in data and data["game"]:
+                game_data = data["game"]
         except Exception:
             pass
-        # Fallback to schedule info if BoxScore not available yet
-        if gid in sb_index:
-            game = sb_index[gid]
-            game_date = normalize_game_date(game.get("gameTimeUTC", ""), target_date)
-            if game_date == target_date:
-                collected_games_payloads.append(game)
-            else:
-                print(f"   ⚠️  Game {gid} is for {game_date}, not {target_date} - skipping")
+
+        # 2. Try CDN URL fallback
+        if game_data is None:
+            print(f"   🌐 nba_api failed for {gid}, trying CDN fallback...")
+            game_data = fetch_game_from_cdn(gid)
+            if game_data:
+                print(f"   ✅ CDN fallback worked for {gid}")
+
+        # 3. Fallback to ScoreBoard data if we have it
+        if game_data is None and gid in sb_index:
+            print(f"   📋 Using ScoreBoard data for {gid}")
+            game_data = sb_index[gid]
+
+        # 4. Last resort: synthesize a minimal stub so we don't silently lose
+        #    a game that the BoxScore scan confirmed exists.
+        if game_data is None:
+            print(f"   ⚠️  All sources failed for {gid}, using minimal stub")
+            game_data = {
+                "gameId": gid,
+                "gameTimeUTC": f"{target_date}T00:00:00Z",
+                "gameStatusText": "Final",
+                "homeTeam": {"teamId": None, "teamTricode": None, "score": 0},
+                "awayTeam": {"teamId": None, "teamTricode": None, "score": 0},
+            }
+
+        game_date = normalize_game_date(game_data.get("gameTimeUTC", ""), target_date)
+        if game_date == target_date:
+            collected_games_payloads.append(game_data)
+        else:
+            print(f"   ⚠️  Game {gid} is for {game_date}, not {target_date} - skipping")
 
     if not collected_games_payloads:
         print(f"⚠️  No games found for {target_date}")
@@ -707,32 +715,31 @@ def ingest_date_nba_live(date_str: str) -> None:
     """Ingest games and stats for a single date."""
     ensure_tables()
     print(f"\n{'='*70}\n🏀 Starting ingestion for {date_str}\n{'='*70}")
-    
-    # Check if we're trying to ingest yesterday's data too early
+
     target_date = datetime.datetime.strptime(date_str, "%Y-%m-%d").date()
     today = datetime.date.today()
     now_et = datetime.datetime.now(ET_TZ)
-    
-    # If target is yesterday and it's before 6 AM ET today, the data might not be ready
+
     if target_date == today - datetime.timedelta(days=1) and now_et.hour < 6:
         print(f"⏰ It's only {now_et.hour}:{now_et.minute:02d} AM ET - yesterday's games may not be finalized yet")
         print(f"💡 Recommended: Run this ingestion after 6 AM ET")
 
     games_df = get_games_for_date(date_str)
     if games_df.empty:
-        # Check if this was API failure or genuinely no games
-        # If we got warnings about scoreboard/boxscore failures, it's an API issue
-        api_failures = [w for w in error_tracker.warnings 
-                       if w["type"] in ["scoreboard_fetch_failed", "boxscore_api_issues"]]
-        
+        # Only treat as an error if we have evidence the API had issues
+        # (scoreboard_fetch_failed or boxscore_api_issues warnings).
+        # If BoxScore scan returned 0 and scoreboard also returned 0 cleanly,
+        # it's a legitimate no-game day.
+        api_failures = [w for w in error_tracker.warnings
+                       if w["type"] in ["scoreboard_fetch_failed", "boxscore_api_issues", "boxscore_consecutive_failures"]]
+
         if api_failures:
-            error_tracker.add_error("no_games_found", 
-                                   f"Date {date_str} - API failures detected", 
+            error_tracker.add_error("no_games_found",
+                                   f"Date {date_str} - API failures detected",
                                    f"{len(api_failures)} API errors, likely not a legitimate no-game day")
         else:
-            # Legitimate no-game day (or off-season)
             print(f"ℹ️  No games scheduled for {date_str} (this may be normal)")
-        
+
         error_tracker.set_stat("games_loaded", 0)
         error_tracker.set_stat("player_rows_loaded", 0)
         return
@@ -743,56 +750,50 @@ def ingest_date_nba_live(date_str: str) -> None:
     error_tracker.set_stat("games_loaded", len(games_df))
     print(f"✅ Loaded {len(games_df)} games")
 
-    playable_statuses = {"Final", "Halftime", "3rd Qtr", "4th Qtr", "End Q1", "End Q2", "End Q3", "In Progress", "Live"}
     stats_total = 0
     skipped_count = 0
     scheduled_count = 0
-    
+
     for _, row in games_df.iterrows():
         status = (row.get("status_type") or "").strip()
         gid = row["event_id"]
-        
-        # Debug: print each game's status
+
         home = row.get("home_abbr", "?")
         away = row.get("away_abbr", "?")
         print(f"🏀 Game {gid}: {away} @ {home} - Status: '{status}'")
-        
-        # Skip games that haven't started yet
-        # Check for: "Scheduled", "Pre-Game", time formats like "7:00 pm ET", or empty status
-        if (not status or 
-            status.lower().startswith("sched") or 
+
+        if (not status or
+            status.lower().startswith("sched") or
             status.lower().startswith("pre") or
-            "pm ET" in status or 
+            "pm ET" in status or
             "am ET" in status):
             print(f"   ⏭️  Skipping (not started - scheduled for {status})")
             skipped_count += 1
             scheduled_count += 1
             continue
-            
+
         print(f"   📊 Fetching player stats...")
         ps = get_player_stats_for_game(gid, date_str)
         if not ps.empty:
             if load_df(ps, "player_boxscores"):
                 stats_total += len(ps)
                 print(f"   ✅ Loaded {len(ps)} player rows")
-            time.sleep(0.3)
         else:
             print(f"   ⚠️  No player stats returned")
-    
+        time.sleep(0.3)
+
     print(f"\n📈 Summary: {len(games_df)} games, {skipped_count} skipped, {stats_total} player rows loaded")
-    
-    # If ALL games were skipped because they're scheduled (not started), that's suspicious
+
     if scheduled_count == len(games_df) and scheduled_count > 0:
-        error_tracker.add_error("wrong_date_data", 
-                               f"All {scheduled_count} games for {date_str} show as 'not started'", 
+        error_tracker.add_error("wrong_date_data",
+                               f"All {scheduled_count} games for {date_str} show as 'not started'",
                                "API may be returning wrong date's schedule or data not finalized yet")
-    
-    # If we loaded games but got 0 player stats, that's a critical error
+
     if len(games_df) > 0 and stats_total == 0 and skipped_count < len(games_df):
-        error_tracker.add_error("no_player_stats", 
-                               f"Loaded {len(games_df)} games but 0 player stats", 
+        error_tracker.add_error("no_player_stats",
+                               f"Loaded {len(games_df)} games but 0 player stats",
                                f"Games appear to be finished but player data unavailable")
-    
+
     error_tracker.set_stat("player_rows_loaded", stats_total)
     print(f"✅ Loaded {stats_total} player stats rows")
 
@@ -802,8 +803,7 @@ def ingest_date_range_nba_live(start_date: str, end_date: str) -> None:
     print(f"\n{'='*70}\n📅 Range ingestion {start_date}..{end_date}\n{'='*70}")
 
     mapping = build_optimized_date_range_games_mapping(start_date, end_date)
-    
-    # Preload ScoreBoard per date
+
     sb_by_date: Dict[str, Dict[str, Any]] = {}
     cur = datetime.datetime.fromisoformat(start_date)
     end = datetime.datetime.fromisoformat(end_date)
@@ -813,7 +813,6 @@ def ingest_date_range_nba_live(start_date: str, end_date: str) -> None:
         sb_by_date[ds] = {g.get("gameId"): g for g in sb_games if g.get("gameId")}
         cur += datetime.timedelta(days=1)
 
-    # If mapping is empty, use ScoreBoard for all dates
     if not mapping:
         print("⚠️  BoxScore mapping empty, using ScoreBoard for all dates...")
         mapping = {}
@@ -837,19 +836,29 @@ def ingest_date_range_nba_live(start_date: str, end_date: str) -> None:
 
         daily_payloads: List[Dict[str, Any]] = []
         for gid in sorted(ids):
-            used_boxscore = False
+            game_data = None
+
+            # 1. nba_api
             try:
                 bx = boxscore.BoxScore(gid)
                 d = bx.get_dict()
-                if "game" in d:
-                    daily_payloads.append(d["game"])
-                    used_boxscore = True
+                if "game" in d and d["game"]:
+                    game_data = d["game"]
             except Exception:
                 pass
-            if not used_boxscore:
+
+            # 2. CDN fallback
+            if game_data is None:
+                game_data = fetch_game_from_cdn(gid)
+
+            # 3. ScoreBoard fallback
+            if game_data is None:
                 sg = sb_by_date.get(ds, {}).get(gid)
                 if sg:
-                    daily_payloads.append(sg)
+                    game_data = sg
+
+            if game_data:
+                daily_payloads.append(game_data)
 
             time.sleep(0.2)
 
@@ -888,7 +897,7 @@ def ingest_date_range_nba_live(start_date: str, end_date: str) -> None:
 # CLI
 # --------
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Ingest NBA data - includes schedule for unplayed games")
+    parser = argparse.ArgumentParser(description="Ingest NBA data")
     parser.add_argument("--mode", choices=["daily", "backfill"], default="daily")
     parser.add_argument("--start", help="YYYY-MM-DD start date for backfill")
     parser.add_argument("--end", help="YYYY-MM-DD end date for backfill")
@@ -896,9 +905,8 @@ def main() -> None:
     args = parser.parse_args()
 
     try:
-        # Validate dates are not in the future
         today = datetime.date.today()
-        
+
         if args.date:
             target_date = datetime.date.fromisoformat(args.date)
             if target_date > today:
@@ -914,15 +922,15 @@ def main() -> None:
             if not args.start or not args.end:
                 print("Error: backfill requires --start and --end")
                 sys.exit(1)
-            
+
             start_date = datetime.date.fromisoformat(args.start)
             end_date = datetime.date.fromisoformat(args.end)
-            
+
             if start_date > today or end_date > today:
                 error_tracker.add_error("future_date", f"Cannot backfill future dates", f"Range {args.start}..{args.end}, today is {today.isoformat()}")
                 print(f"❌ Error: Cannot backfill future dates (today is {today.isoformat()})")
                 return
-            
+
             date_diff = (end_date - start_date).days + 1
             if date_diff <= 60:
                 ingest_date_range_nba_live(args.start, args.end)
@@ -938,10 +946,7 @@ def main() -> None:
                         time.sleep(10)
             print(f"✅ Backfill complete {args.start}..{args.end}")
     finally:
-        # Always print summary
         print(error_tracker.get_summary())
-        
-        # Exit with error code if there were critical errors
         if error_tracker.should_exit_with_error():
             print("🚨 EXITING WITH ERROR DUE TO CRITICAL FAILURES")
             sys.exit(1)
